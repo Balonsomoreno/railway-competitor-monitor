@@ -289,13 +289,12 @@ app.get("/", async (req, res) => {
       font-weight: 600;
       color: var(--ink);
       margin: 0 0 6px;
-      max-width: 46ch;
     }
     .tagline {
       font-size: 13px;
       color: var(--ink-soft);
       margin: 0;
-      max-width: 46ch;
+      max-width: 60ch;
     }
     .refresh-btn {
       background: var(--ink);
@@ -509,6 +508,32 @@ app.get("/", async (req, res) => {
       font-size: 13px;
       padding: 8px 0;
     }
+    .sig-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 18px;
+      font-size: 11.5px;
+      color: var(--ink-faint);
+      margin: 0;
+    }
+    .sig-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+    .sig-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .signal-company-group { margin-bottom: 24px; }
+    .signal-company-group:last-child { margin-bottom: 0; }
+    .signal-company-heading {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 4px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--rule);
+    }
     .origin-tag {
       font-family: var(--mono);
       font-size: 9.5px;
@@ -522,20 +547,25 @@ app.get("/", async (req, res) => {
     <div>
       <h1>Competitor Watch</h1>
       <p class="subhead">Built to answer "what have our competitors done recently?"</p>
-      <p class="tagline">Checks changelogs, blogs, docs, status pages, pricing, and job listings across ${companies.length} developer platforms every 6 hours — surfacing competitive moves the moment they happen, or the instant you ask.</p>
+      <p class="tagline">Checks changelogs, blogs, docs, status pages, pricing, and job listings across eight competitive developer platforms, surfacing competitive moves for ongoing intelligence.</p>
     </div>
     <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
   </header>
 
   <div class="signal-section">
     <div class="section-title" style="margin-bottom:4px">This week's signal</div>
-    <p class="section-intro" style="margin-bottom:16px">The highest-significance items found across all ${SOURCES.length} sources. Press "Check for updates" above to refresh.</p>
+    <p class="section-intro" style="margin-bottom:8px">The most significant items found across all ${SOURCES.length} sources, grouped by competitor. Press "Check for updates" above to refresh.</p>
+    <p class="sig-legend" style="margin-bottom:16px">
+      <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — likely a real product, pricing, or positioning move</span>
+      <span class="sig-legend-item"><span class="sig-dot" style="background:#8A6A3D"></span>Medium — worth a glance</span>
+      <span class="sig-legend-item"><span class="sig-dot" style="background:#8C8C88"></span>Low — minor or routine</span>
+    </p>
     <div id="signalResults"><p class="signal-empty">Press "Check for updates" to pull the latest.</p></div>
   </div>
 
   <details class="sources-details">
-    <summary>Tracking ${SOURCES.length} sources across ${companies.length} companies <span class="chevron">▾</span></summary>
-    <p class="section-intro" style="margin-top:12px"><em>Source counts differ because not every company publishes a public changelog, CLI, or careers page we can track.</em></p>
+    <summary>Tracking ${companies.length} competitors across ${SOURCES.length} sources <span class="chevron">▾</span></summary>
+    <p class="section-intro" style="margin-top:12px; max-width:none"><em>Source counts differ because not every company publishes a public changelog, CLI, or careers page we can track.</em></p>
     <div class="coverage">
       ${companies
         .map((company) => {
@@ -581,29 +611,41 @@ app.get("/", async (req, res) => {
         } else {
           const sigColors = { HIGH: '#C77D2E', MEDIUM: '#8A6A3D', LOW: '#8C8C88' };
           const sigLabels = { HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low' };
-          // Show the top 8 by significance prominently; collapse the rest
-          // under a disclosure so the section stays a highlights reel,
-          // not another full dump.
-          const top = data.items.slice(0, 8);
-          const rest = data.items.slice(8);
+          const sigRank = { HIGH: 3, MEDIUM: 2, LOW: 1 };
 
           const renderRow = (item) => {
             const company = item.source.split(' ')[0];
             const channel = item.source.slice(company.length).trim() || 'Page';
+            const color = sigColors[item.significance] || sigColors.LOW;
+            const label = sigLabels[item.significance] || 'Low';
+            return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + item.url + '" target="_blank" rel="noopener" class="row-summary-link">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
+          };
+
+          // Group by company so the signal reads as "here's what each
+          // competitor did," not one flat list a person has to mentally
+          // re-sort by company themselves.
+          const byCompany = {};
+          for (const item of data.items) {
+            const company = item.source.split(' ')[0];
+            (byCompany[company] = byCompany[company] || []).push(item);
+          }
+
+          // Order companies by their single highest-significance item, so
+          // a competitor with real HIGH-priority news leads the section.
+          const companies = Object.keys(byCompany).sort((a, b) => {
+            const maxA = Math.max(...byCompany[a].map(i => sigRank[i.significance] || 0));
+            const maxB = Math.max(...byCompany[b].map(i => sigRank[i.significance] || 0));
+            return maxB - maxA;
+          });
+
+          resultsEl.innerHTML = companies.map(company => {
+            const items = byCompany[company].sort((a, b) => (sigRank[b.significance] || 0) - (sigRank[a.significance] || 0));
             const homepage = COMPANY_HOMEPAGES[company];
             const companyLabel = homepage
               ? '<a href="' + homepage + '" target="_blank" rel="noopener" class="coverage-company-link">' + company + '</a>'
               : company;
-            const color = sigColors[item.significance] || sigColors.LOW;
-            const label = sigLabels[item.significance] || 'Low';
-            return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-company">' + companyLabel + '</span><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + item.url + '" target="_blank" rel="noopener" class="row-summary-link">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
-          };
-
-          let html = top.map(renderRow).join('');
-          if (rest.length > 0) {
-            html += '<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--ink-faint)">+ ' + rest.length + ' more, lower priority</summary>' + rest.map(renderRow).join('') + '</details>';
-          }
-          resultsEl.innerHTML = html;
+            return '<div class="signal-company-group"><div class="signal-company-heading">' + companyLabel + '</div>' + items.map(renderRow).join('') + '</div>';
+          }).join('');
         }
       } catch (err) {
         resultsEl.innerHTML = '<p class="signal-empty">Check failed: ' + err.message + '</p>';
@@ -617,7 +659,7 @@ app.get("/", async (req, res) => {
   <div class="feed-header" style="margin-top:36px">
     <div class="section-title" style="margin-bottom:0">Full history</div>
   </div>
-  <p class="section-intro">Everything logged from background checks — the same data feeding the signal above, without the highlighting.</p>
+  <p class="section-intro">Every change caught by the background checker, in order — same source as the signal above, just unsorted. Use the tabs to only look at a certain time range.</p>
 
   <div class="feed-header">
     <div class="window-tabs">

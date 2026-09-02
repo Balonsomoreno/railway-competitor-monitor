@@ -50,12 +50,24 @@ function ruleBasedSignificance(addedText) {
 // This is a real, explicit filter (not a dedup trick) because the
 // underlying problem isn't duplication — it's that "no incidents" is not
 // informative regardless of how many different dates it's stamped with.
+//
+// Also filters generic marketing/nav chrome that shows up as "new" text
+// purely because a promo banner rotated or A/B-tested — e.g. Render's
+// careers page briefly diffed as a "MEDIUM significance change" because a
+// migration-credits promo banner sitting inside <main> changed wording
+// between polls, and the crude fallback diff had no way to know that
+// wasn't a real content change. These patterns catch the most common
+// forms of that (generic CTAs, nav labels) without needing to know every
+// site's specific promo copy in advance.
 const ROUTINE_NOISE_PATTERNS = [
   /^no incidents reported/i,
   /^all systems operational/i,
   /^\s*update\s*[-—]\s*(we are continuing|we're continuing)/i,
   /^\s*monitoring\s*[-—]/i,
   /^\s*investigating\s*[-—]/i,
+  /^(sign in|get started|apply now|learn more|log ?in|sign ?up)\b/i,
+  /\bmigrat(e|ion) (to|credits)\b/i,
+  /^(migrating|evolve the cloud|elevate your craft)/i,
 ];
 
 function isRoutineNoise(text) {
@@ -97,15 +109,37 @@ function crudeAddedText(before, after) {
   }
   if (current.length >= 4) runs.push(current.join(" "));
 
-  if (runs.length === 0) return after.slice(0, 300).trim();
+  // Drop runs that are just marketing/nav chrome (promo banners, generic
+  // CTAs) before picking one — otherwise a rotating banner can outrank a
+  // genuinely smaller but real content change just by being longer text.
+  const meaningfulRuns = runs.filter((run) => !isRoutineNoise(run));
 
-  // Return the longest run — most likely to be one real new
+  if (meaningfulRuns.length === 0) {
+    // Nothing survived the noise filter — either the whole diff was
+    // chrome, or there were no 4+ word runs at all. Returning empty
+    // string (not raw after-text) signals "no real content change found"
+    // to the caller, rather than silently falling back to unfiltered text.
+    return "";
+  }
+
+  // Return the longest surviving run — most likely to be one real new
   // sentence/entry rather than a scattered fragment.
-  return runs.sort((a, b) => b.length - a.length)[0];
+  return meaningfulRuns.sort((a, b) => b.length - a.length)[0];
 }
 
 function ruleBasedSummarizeChange({ before, after }) {
   const added = crudeAddedText(before, after);
+  if (!added) {
+    // The diff was real (hash changed) but everything new was filtered as
+    // marketing/nav chrome — most likely a rotating promo banner, not an
+    // actual content change. Reported as LOW rather than hidden entirely:
+    // the page DID change, which is still worth a low-priority record,
+    // just not worth surfacing as meaningful.
+    return {
+      summary: "Page content changed, but the difference looks like site chrome (nav, promo banner) rather than real content — no meaningful excerpt to show.",
+      significance: "LOW",
+    };
+  }
   const trimmed = added.length > 220 ? `${added.slice(0, 220)}…` : added;
   return {
     summary: `Content changed (AI summary unavailable — no API credits). Excerpt of new text: "${trimmed}"`,
