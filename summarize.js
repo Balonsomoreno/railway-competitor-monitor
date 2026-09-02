@@ -42,6 +42,27 @@ function ruleBasedSignificance(addedText) {
   return "LOW";
 }
 
+// Status pages repeat a small set of boilerplate phrases constantly — "No
+// incidents reported [date]" for every day nothing happened, "Monitoring",
+// "Update — we are continuing to..." at every stage of one ongoing
+// incident. Each is a technically-real, differently-dated line, but a
+// stream of them is routine operational noise, not competitive signal.
+// This is a real, explicit filter (not a dedup trick) because the
+// underlying problem isn't duplication — it's that "no incidents" is not
+// informative regardless of how many different dates it's stamped with.
+const ROUTINE_NOISE_PATTERNS = [
+  /^no incidents reported/i,
+  /^all systems operational/i,
+  /^\s*update\s*[-—]\s*(we are continuing|we're continuing)/i,
+  /^\s*monitoring\s*[-—]/i,
+  /^\s*investigating\s*[-—]/i,
+];
+
+function isRoutineNoise(text) {
+  const trimmed = text.trim();
+  return ROUTINE_NOISE_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
 // Rough "what's new" extraction using a real contiguous-block diff instead
 // of a bag-of-words filter. The previous version filtered `after` down to
 // individual words not present in `before` and concatenated them in
@@ -116,9 +137,23 @@ function ruleBasedExtractRecentItems(content, windowDays) {
   const now = new Date();
   const cutoff = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
   const items = [];
-  let match;
-  DATE_RE.lastIndex = 0;
-  while ((match = DATE_RE.exec(content)) !== null) {
+
+  // Now that extractText() preserves element boundaries as newlines,
+  // operate line-by-line instead of slicing raw character offsets across
+  // the whole blob. This is the actual fix for excerpts that used to
+  // mash unrelated page elements together (e.g. a name from one card
+  // running into the next card's text) — each line here corresponds to
+  // one real block-level element on the page, so an excerpt drawn from a
+  // date's own line (or the very next line) can't cross into unrelated
+  // content the way raw character-slicing could.
+  const lines = content.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    DATE_RE.lastIndex = 0;
+    const match = DATE_RE.exec(line);
+    if (!match) continue;
+
     const [full, monthStr, dayStr, yearStr] = match;
     const monthKey = monthStr.slice(0, 3).toLowerCase();
     const monthIdx = MONTH_INDEX[monthKey];
@@ -126,20 +161,21 @@ function ruleBasedExtractRecentItems(content, windowDays) {
     const parsedDate = new Date(Number(yearStr), monthIdx, Number(dayStr));
     if (parsedDate < cutoff || parsedDate > now) continue;
 
-    // Grab a short excerpt of text immediately following the date match as
-    // a crude "what happened" stand-in — this is the raw page text, not an
-    // AI-written summary, so it may run together at word/section
-    // boundaries (no HTML structure survives text extraction). Cut at the
-    // next capital-letter-after-lowercase boundary if one appears early,
-    // as a rough sentence-ish break; otherwise just truncate.
-    const excerptStart = match.index + full.length;
-    let excerpt = content.slice(excerptStart, excerptStart + 220).trim();
-    const sentenceBreak = excerpt.slice(10).search(/[a-z]\.[A-Z]|[a-z](?=[A-Z][a-z])/);
-    if (sentenceBreak > 20) excerpt = excerpt.slice(0, sentenceBreak + 11);
+    // The headline text can appear either before or after the date on the
+    // same line, depending on the site's markup (e.g. "No incidents
+    // reported. Sep 1, 2026" vs. "Sep 1, 2026 — New feature launched").
+    // Try same-line-before first (usually the more complete phrase when
+    // present), then same-line-after, then fall back to the next line.
+    const beforeDate = line.slice(0, match.index).trim();
+    const afterDate = line.slice(match.index + full.length).trim();
+    const excerpt =
+      beforeDate.length > 3 ? beforeDate : afterDate.length > 3 ? afterDate : (lines[i + 1] || "").trim();
+
+    if (!excerpt || isRoutineNoise(excerpt)) continue;
 
     items.push({
       dateLabel: full,
-      summary: excerpt || "(no excerpt available)",
+      summary: excerpt.slice(0, 220),
       significance: ruleBasedSignificance(excerpt),
     });
   }

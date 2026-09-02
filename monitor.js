@@ -8,7 +8,20 @@ function hash(text) {
   return crypto.createHash("sha256").update(text).digest("hex");
 }
 
-// Strip tags, collapse whitespace -> normalized text we can hash + diff.
+// Strip tags, but preserve boundaries between block-level elements as a
+// newline before collapsing whitespace -> text where separate page
+// elements (a nav link, a blog title, a byline) don't run directly into
+// each other with no boundary at all. This matters a lot for downstream
+// text processing (regex date-matching, excerpt extraction) — without a
+// boundary marker, "...Snell, Shaheen Fattoe" from one card and the next
+// card's opening text can concatenate into nonsense that reads like one
+// garbled sentence. Cheerio's plain .text() on a whole subtree does not
+// insert any separator between sibling/nested block elements, which was
+// the actual root cause of that garbling — not the excerpt-selection
+// logic downstream, which was just faithfully slicing already-corrupted
+// text.
+const BLOCK_TAGS = "p,div,li,h1,h2,h3,h4,h5,h6,article,section,tr,br,dt,dd";
+
 export function extractText(html, selector) {
   const $ = cheerio.load(html);
   const selectors = selector.split(",").map((s) => s.trim());
@@ -21,7 +34,23 @@ export function extractText(html, selector) {
   }
   const target = node || $("body");
   target.find("script, style, noscript, nav, footer").remove();
-  return target.text().replace(/\s+/g, " ").trim();
+
+  // Insert a newline marker after every block-level element so text()
+  // can't silently fuse unrelated elements together.
+  target.find(BLOCK_TAGS).after("\n");
+
+  const raw = target.text();
+  // Collapse runs of horizontal whitespace, but keep the newline
+  // boundaries intact; then collapse 3+ consecutive newlines (empty
+  // elements, nested blocks) down to a single one.
+  return raw
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
 }
 
 export async function fetchSource(source) {
