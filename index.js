@@ -53,6 +53,54 @@ app.get("/api/scan-recent", async (req, res) => {
   res.json({ scannedAt: new Date().toISOString(), windowDays, results });
 });
 
+// Combined action: runs the poll-based check (updates snapshots/changes in
+// the DB, same as /api/check-now) AND the live content scan (same as
+// /api/scan-recent) together, then merges both into one significance-
+// sorted list. This exists because from a user's perspective "go check
+// what's new" is one action — the poll-diff vs. content-scan distinction
+// is an implementation detail (different mechanisms for catching
+// different kinds of gaps), not something worth exposing as two separate
+// buttons/results the person has to reconcile themselves.
+app.get("/api/refresh-all", async (req, res) => {
+  const windowDays = { "24h": 1, "7d": 7, "30d": 30 }[req.query.window] || 7;
+  const [checkResults, scanResults] = await Promise.all([
+    checkAllSources(),
+    scanRecentAcrossSources(windowDays),
+  ]);
+
+  const sigRank = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+  const merged = [];
+
+  for (const r of checkResults) {
+    if (r.status === "change_detected") {
+      merged.push({
+        source: r.source,
+        url: SOURCES.find((s) => s.name === r.source)?.url || "",
+        summary: r.summary,
+        significance: r.significance,
+        dateLabel: "just now",
+        origin: "poll", // this change was caught by diffing against the last stored snapshot
+      });
+    }
+  }
+  for (const r of scanResults) {
+    for (const item of r.items || []) {
+      merged.push({
+        source: r.source,
+        url: r.url,
+        summary: item.summary,
+        significance: item.significance,
+        dateLabel: item.dateLabel,
+        origin: "scan", // this item was found by reading the page's current content directly
+      });
+    }
+  }
+
+  merged.sort((a, b) => (sigRank[b.significance] || 0) - (sigRank[a.significance] || 0));
+
+  res.json({ refreshedAt: new Date().toISOString(), windowDays, items: merged });
+});
+
 // Debug: show exactly what one source's extraction pipeline actually sees,
 // step by step. Built specifically to answer "why did scan-recent come back
 // empty" — rather than guess between (a) the page has no visible dates,
@@ -236,6 +284,13 @@ app.get("/", async (req, res) => {
       letter-spacing: -0.01em;
       margin: 0 0 4px;
     }
+    .subhead {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--ink);
+      margin: 0 0 6px;
+      max-width: 46ch;
+    }
     .tagline {
       font-size: 13px;
       color: var(--ink-soft);
@@ -302,8 +357,8 @@ app.get("/", async (req, res) => {
       margin-bottom: 4px;
     }
     .coverage-item-head b { color: var(--ink); font-weight: 700; }
-    .coverage-company-link { color: inherit; text-decoration: none; }
-    .coverage-company-link:hover { text-decoration: underline; }
+    .coverage-company-link { color: var(--structure); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 2px; }
+    .coverage-company-link:hover { text-decoration-color: currentColor; }
     .coverage-item-channels {
       color: var(--ink-faint);
       font-size: 10.5px;
@@ -346,20 +401,6 @@ app.get("/", async (req, res) => {
       background: var(--ink);
       color: var(--paper);
     }
-
-    .check-now-btn {
-      background: none;
-      border: 1px solid var(--rule);
-      color: var(--ink-soft);
-      font-family: var(--sans);
-      font-size: 12px;
-      font-weight: 550;
-      padding: 6px 12px;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    .check-now-btn:hover { border-color: var(--ink-faint); color: var(--ink); }
-    .check-now-btn:disabled { opacity: 0.6; cursor: default; }
 
     .empty-state {
       border: 1px dashed var(--rule);
@@ -433,6 +474,12 @@ app.get("/", async (req, res) => {
       color: var(--ink);
       line-height: 1.55;
     }
+    .row-summary-link {
+      color: inherit;
+      text-decoration: none;
+      border-bottom: 1px solid var(--rule);
+    }
+    .row-summary-link:hover { border-bottom-color: var(--structure); color: var(--structure); }
     .row-source a { color: inherit; text-decoration: none; }
     .row-source a:hover { text-decoration: underline; }
 
@@ -448,20 +495,47 @@ app.get("/", async (req, res) => {
       .row { grid-template-columns: 60px 1fr; }
       .row-time { grid-column: 2; padding-top: 0; }
     }
+
+    .signal-section {
+      background: var(--paper-raised);
+      border: 1px solid var(--rule);
+      border-radius: 10px;
+      padding: 20px 22px;
+      margin-bottom: 36px;
+    }
+    .signal-section .row { padding: 12px 0; }
+    .signal-empty {
+      color: var(--ink-faint);
+      font-size: 13px;
+      padding: 8px 0;
+    }
+    .origin-tag {
+      font-family: var(--mono);
+      font-size: 9.5px;
+      color: var(--ink-faint);
+      text-transform: uppercase;
+    }
   </style>
 </head>
 <body>
   <header>
     <div>
       <h1>Competitor Watch</h1>
-      <p class="tagline">Built to answer "what have our competitors done recently?" Competitor Watch automatically checks changelogs, blogs, docs, status pages, pricing, and job listings across ${companies.length} developer platforms, every 6 hours, to keep a running log of competitor intelligence.</p>
+      <p class="subhead">Built to answer "what have our competitors done recently?"</p>
+      <p class="tagline">Checks changelogs, blogs, docs, status pages, pricing, and job listings across ${companies.length} developer platforms every 6 hours — surfacing competitive moves the moment they happen, or the instant you ask.</p>
     </div>
-    <button class="refresh-btn" id="scanBtn" onclick="runScan()">Run scan now</button>
+    <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
   </header>
+
+  <div class="signal-section">
+    <div class="section-title" style="margin-bottom:4px">This week's signal</div>
+    <p class="section-intro" style="margin-bottom:16px">The highest-significance items found across all ${SOURCES.length} sources. Press "Check for updates" above to refresh.</p>
+    <div id="signalResults"><p class="signal-empty">Press "Check for updates" to pull the latest.</p></div>
+  </div>
 
   <details class="sources-details">
     <summary>Tracking ${SOURCES.length} sources across ${companies.length} companies <span class="chevron">▾</span></summary>
-    <p class="section-intro" style="margin-top:12px">Each card is one company. The count is how many of its pages have been checked at least once — companies differ because not every company publishes a public changelog, CLI, or careers page under a URL this tool could confirm.</p>
+    <p class="section-intro" style="margin-top:12px"><em>Source counts differ because not every company publishes a public changelog, CLI, or careers page we can track.</em></p>
     <div class="coverage">
       ${companies
         .map((company) => {
@@ -480,60 +554,70 @@ app.get("/", async (req, res) => {
     </div>
   </details>
 
-  <div class="section-title" style="margin-top:32px">What's new right now</div>
-  <div id="scanResults"><p class="section-intro">Press "Run scan now" above to check all ${SOURCES.length} sources for recent activity.</p></div>
-
   <script>
     const COMPANY_HOMEPAGES = ${JSON.stringify(COMPANY_HOMEPAGES)};
 
-    async function runScan() {
+    // Runs BOTH the poll-check (updates the stored change history) and the
+    // live content scan, then renders one merged, significance-sorted
+    // list. This replaced two separate buttons/results because the
+    // poll-vs-scan distinction is a backend implementation detail, not
+    // something a person evaluating competitors should have to reconcile
+    // themselves across two different lists.
+    async function runRefresh() {
       const btn = document.getElementById('scanBtn');
-      const resultsEl = document.getElementById('scanResults');
+      const resultsEl = document.getElementById('signalResults');
       const windowParam = new URLSearchParams(location.search).get('window') || 'all';
       const scanWindow = ['24h', '7d', '30d'].includes(windowParam) ? windowParam : '7d';
 
       btn.disabled = true;
-      btn.textContent = 'Scanning ' + ${SOURCES.length} + ' pages…';
-      resultsEl.innerHTML = '';
+      btn.textContent = 'Checking ' + ${SOURCES.length} + ' sources…';
 
       try {
-        const res = await fetch('/api/scan-recent?window=' + scanWindow);
+        const res = await fetch('/api/refresh-all?window=' + scanWindow);
         const data = await res.json();
-        const withItems = data.results.filter(r => r.items && r.items.length > 0);
 
-        if (withItems.length === 0) {
-          resultsEl.innerHTML = '<div class="empty-state"><b>No dated items found in the last ' + data.windowDays + ' days.</b><br>Either nothing was published in that window, or the pages do not show visible dates this tool could read.</div>';
+        if (data.items.length === 0) {
+          resultsEl.innerHTML = '<p class="signal-empty">Nothing new found. Either nothing changed, or these pages do not show dates this tool could read.</p>';
         } else {
-          resultsEl.innerHTML = withItems.map(r => {
-            const company = r.source.split(' ')[0];
-            const channel = r.source.slice(company.length).trim() || 'Page';
+          const sigColors = { HIGH: '#C77D2E', MEDIUM: '#8A6A3D', LOW: '#8C8C88' };
+          const sigLabels = { HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low' };
+          // Show the top 8 by significance prominently; collapse the rest
+          // under a disclosure so the section stays a highlights reel,
+          // not another full dump.
+          const top = data.items.slice(0, 8);
+          const rest = data.items.slice(8);
+
+          const renderRow = (item) => {
+            const company = item.source.split(' ')[0];
+            const channel = item.source.slice(company.length).trim() || 'Page';
             const homepage = COMPANY_HOMEPAGES[company];
             const companyLabel = homepage
               ? '<a href="' + homepage + '" target="_blank" rel="noopener" class="coverage-company-link">' + company + '</a>'
               : company;
-            return r.items.map(item => {
-              const sigColors = { HIGH: '#C77D2E', MEDIUM: '#8A6A3D', LOW: '#8C8C88' };
-              const sigLabels = { HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low' };
-              const color = sigColors[item.significance] || sigColors.LOW;
-              const label = sigLabels[item.significance] || 'Low';
-              return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-company">' + companyLabel + '</span><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + r.url + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
-            }).join('');
-          }).join('');
+            const color = sigColors[item.significance] || sigColors.LOW;
+            const label = sigLabels[item.significance] || 'Low';
+            return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-company">' + companyLabel + '</span><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + item.url + '" target="_blank" rel="noopener" class="row-summary-link">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
+          };
+
+          let html = top.map(renderRow).join('');
+          if (rest.length > 0) {
+            html += '<details style="margin-top:12px"><summary style="cursor:pointer;font-size:12px;color:var(--ink-faint)">+ ' + rest.length + ' more, lower priority</summary>' + rest.map(renderRow).join('') + '</details>';
+          }
+          resultsEl.innerHTML = html;
         }
       } catch (err) {
-        resultsEl.innerHTML = '<div class="empty-state"><b>Scan failed.</b><br>' + err.message + '</div>';
+        resultsEl.innerHTML = '<p class="signal-empty">Check failed: ' + err.message + '</p>';
       }
 
       btn.disabled = false;
-      btn.textContent = 'Scan ${SOURCES.length} pages now';
+      btn.textContent = 'Check for updates';
     }
   </script>
 
   <div class="feed-header" style="margin-top:36px">
-    <div class="section-title" style="margin-bottom:0">Changes since last check</div>
-    <button class="check-now-btn" onclick="this.textContent='Checking…'; this.disabled=true; fetch('/api/check-now',{method:'POST'}).then(()=>location.reload())">Check now</button>
+    <div class="section-title" style="margin-bottom:0">Full history</div>
   </div>
-  <p class="section-intro">Auto-checked every 6 hours in the background — press "Check now" to poll immediately instead.</p>
+  <p class="section-intro">Everything logged from background checks — the same data feeding the signal above, without the highlighting.</p>
 
   <div class="feed-header">
     <div class="window-tabs">
@@ -550,7 +634,7 @@ app.get("/", async (req, res) => {
           activeWindow === "all"
             ? "No changes recorded yet."
             : `No changes in the last ${{ "24h": "24 hours", "7d": "7 days", "30d": "30 days" }[activeWindow]}.`
-        }</b><br>Baselines are being established for ${SOURCES.length} sources across ${companies.length} companies. Once a tracked page changes from its baseline, it'll appear here — press "Check now" above to poll immediately instead of waiting for the next scheduled run.</div>`
+        }</b><br>Baselines are being established for ${SOURCES.length} sources across ${companies.length} companies. Press "Check for updates" above to poll immediately instead of waiting for the next scheduled run.</div>`
       : changes
           .map((c) => {
             const sig = sigMeta[c.significance] || sigMeta.LOW;
@@ -565,7 +649,7 @@ app.get("/", async (req, res) => {
       <div class="row-sig" style="color:${sig.color}">${sig.label}</div>
       <div class="row-body">
         <div class="row-source"><span class="row-company">${companyLabel}</span><span class="row-channel">${channel}</span></div>
-        <div class="row-summary"><a href="${c.url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${c.summary}</a></div>
+        <div class="row-summary"><a href="${c.url}" target="_blank" rel="noopener" class="row-summary-link">${c.summary}</a></div>
       </div>
       <div class="row-time">${timeAgo(c.detected_at)}</div>
     </div>`;
