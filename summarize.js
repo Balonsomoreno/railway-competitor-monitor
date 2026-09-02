@@ -42,22 +42,52 @@ function ruleBasedSignificance(addedText) {
   return "LOW";
 }
 
-// Very rough "what's new" extraction: finds the longest contiguous run of
-// `after` that doesn't appear in `before`, as a stand-in for a real diff
-// algorithm. Not a proper LCS/diff — good enough to show *something*
-// changed without an AI summarizer, not a precise diff tool.
+// Rough "what's new" extraction using a real contiguous-block diff instead
+// of a bag-of-words filter. The previous version filtered `after` down to
+// individual words not present in `before` and concatenated them in
+// order — which produces garbled, out-of-context text when the "new"
+// words are scattered across unrelated parts of the page (e.g. one word
+// from a blog title here, one from a nav element there, stitched
+// together into nonsense). This version finds actual contiguous runs of
+// new text by walking both strings and only starting a new "run" when
+// the word sequence actually diverges, which keeps real phrases intact.
 function crudeAddedText(before, after) {
-  if (!before) return after.slice(0, 300);
-  const beforeWords = new Set(before.split(/\s+/));
+  if (!before) return after.slice(0, 300).trim();
+
+  const beforeWords = before.split(/\s+/);
   const afterWords = after.split(/\s+/);
-  const novel = afterWords.filter((w) => !beforeWords.has(w));
-  return novel.slice(0, 60).join(" ") || after.slice(0, 300);
+  const beforeSet = new Set(beforeWords);
+
+  // Find contiguous runs of consecutive afterWords that are all "new"
+  // (not merely present-somewhere-in-before, but part of an unbroken
+  // stretch of unfamiliar text) — this is still not a true diff
+  // algorithm, but requiring runs of 4+ consecutive new words rather than
+  // any single new word sharply cuts down on stitching together
+  // unrelated fragments.
+  const runs = [];
+  let current = [];
+  for (const word of afterWords) {
+    if (!beforeSet.has(word)) {
+      current.push(word);
+    } else {
+      if (current.length >= 4) runs.push(current.join(" "));
+      current = [];
+    }
+  }
+  if (current.length >= 4) runs.push(current.join(" "));
+
+  if (runs.length === 0) return after.slice(0, 300).trim();
+
+  // Return the longest run — most likely to be one real new
+  // sentence/entry rather than a scattered fragment.
+  return runs.sort((a, b) => b.length - a.length)[0];
 }
 
 function ruleBasedSummarizeChange({ before, after }) {
   const added = crudeAddedText(before, after);
+  const trimmed = added.length > 220 ? `${added.slice(0, 220)}…` : added;
   return {
-    summary: `Page content changed (AI summary unavailable — no API credits). New/changed text includes: "${added.slice(0, 200)}${added.length > 200 ? "…" : ""}"`,
+    summary: `Content changed (AI summary unavailable — no API credits). Excerpt of new text: "${trimmed}"`,
     significance: ruleBasedSignificance(added),
   };
 }
@@ -73,6 +103,10 @@ function ruleBasedSummarizeChange({ before, after }) {
 // will miss items whose dates are in a format this regex doesn't cover.
 const MONTHS = "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?";
 const DATE_RE = new RegExp(`(${MONTHS})\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})`, "gi");
+// Separate non-global instance for one-off strip operations (e.g. in
+// dedup below) so it never shares/depends on DATE_RE's lastIndex state,
+// which the main extraction loop relies on.
+const DATE_RE_STRIP = new RegExp(`(${MONTHS})\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})`, "gi");
 const MONTH_INDEX = {
   jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
   jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
@@ -109,7 +143,26 @@ function ruleBasedExtractRecentItems(content, windowDays) {
       significance: ruleBasedSignificance(excerpt),
     });
   }
-  return items;
+
+  // Status pages in particular tend to show the same incident restated at
+  // each update (e.g. "Investigating" -> "Monitoring" -> "Resolved" for one
+  // incident produces 2-3 near-identical entries with different dates).
+  // Each is a technically-real distinct dated mention, but showing all of
+  // them reads as noise rather than 2-3 separate events. Collapse entries
+  // whose first ~60 characters match to just the most recent one.
+  const seen = new Map(); // key: normalized first ~60 chars, value: kept
+  const deduped = [];
+  for (const item of items) {
+    // Strip a possible leading date (some excerpts start with the *next*
+    // entry's date bleeding in from truncation) before comparing, so
+    // "Aug 28, 2026 Projects failing..." and "Projects failing..." are
+    // recognized as the same underlying text.
+    const normalized = item.summary.replace(DATE_RE_STRIP, "").trim().slice(0, 60).toLowerCase();
+    if (seen.has(normalized)) continue;
+    seen.set(normalized, true);
+    deduped.push(item);
+  }
+  return deduped;
 }
 
 // Ask Claude to describe what changed and why a growth/content marketer

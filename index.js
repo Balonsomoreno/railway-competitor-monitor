@@ -258,13 +258,31 @@ app.get("/", async (req, res) => {
     }
     .refresh-btn:hover { background: #333; }
 
+    .sources-details {
+      margin-bottom: 32px;
+      border-bottom: 1px solid var(--rule);
+      padding-bottom: 20px;
+    }
+    .sources-details summary {
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink-soft);
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
+    }
+    .sources-details summary::-webkit-details-marker { display: none; }
+    .sources-details summary:hover { color: var(--ink); }
+    .chevron { font-size: 10px; transition: transform 0.15s ease; }
+    .sources-details[open] .chevron { transform: rotate(180deg); }
+
     .coverage {
       display: flex;
       flex-wrap: wrap;
       gap: 8px 10px;
-      margin-bottom: 40px;
-      padding-bottom: 24px;
-      border-bottom: 1px solid var(--rule);
     }
     .coverage-item {
       font-family: var(--mono);
@@ -272,10 +290,23 @@ app.get("/", async (req, res) => {
       color: var(--ink-faint);
       background: var(--paper-raised);
       border: 1px solid var(--rule);
-      border-radius: 5px;
-      padding: 5px 10px;
+      border-radius: 6px;
+      padding: 8px 10px;
+      min-width: 140px;
     }
-    .coverage-item b { color: var(--ink-soft); font-weight: 600; }
+    .coverage-item-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 4px;
+    }
+    .coverage-item-head b { color: var(--ink); font-weight: 700; }
+    .coverage-item-channels {
+      color: var(--ink-faint);
+      font-size: 10.5px;
+      line-height: 1.5;
+    }
 
     .feed-header {
       display: flex;
@@ -421,28 +452,29 @@ app.get("/", async (req, res) => {
   <header>
     <div>
       <h1>Competitor Watch</h1>
-      <p class="tagline">Automatically checks ${SOURCES.length} pages — changelogs, blogs, docs, status pages, pricing, and job listings — across ${companies.length} developer platforms, every 6 hours. Built to answer "what did our competitors just do?"</p>
+      <p class="tagline">Built to answer "what have our competitors done recently?" Competitor Watch automatically checks changelogs, blogs, docs, status pages, pricing, and job listings across ${companies.length} developer platforms, every 6 hours, to keep a running log of competitor intelligence.</p>
     </div>
     <button class="refresh-btn" onclick="this.textContent='Checking…'; this.disabled=true; fetch('/api/check-now',{method:'POST'}).then(()=>location.reload())">Check now</button>
   </header>
 
-  <div class="section-title" style="margin-top:8px">Sources being tracked</div>
-  <p class="section-intro">One card per company. The number shows how many of that company's pages have been checked at least once.</p>
+  <details class="sources-details">
+    <summary>Tracking ${SOURCES.length} sources across ${companies.length} companies <span class="chevron">▾</span></summary>
+    <p class="section-intro" style="margin-top:12px">Each card is one company. The count is how many of its pages have been checked at least once — companies differ because not every company publishes a public changelog, CLI, or careers page under a URL this tool could confirm.</p>
+    <div class="coverage">
+      ${companies
+        .map((company) => {
+          const companySources = SOURCES.filter((s) => companyOf(s.name) === company);
+          const checked = companySources.filter((s) =>
+            snapshotCounts.some((c) => c.source_name === s.name)
+          ).length;
+          const channelList = companySources.map((s) => channelOf(s.name, company)).join(" · ");
+          return `<div class="coverage-item"><div class="coverage-item-head"><b>${company}</b><span>${checked}/${companySources.length} sources</span></div><div class="coverage-item-channels">${channelList}</div></div>`;
+        })
+        .join("")}
+    </div>
+  </details>
 
-  <div class="coverage">
-    ${companies
-      .map((company) => {
-        const companySources = SOURCES.filter((s) => companyOf(s.name) === company);
-        const checked = companySources.filter((s) =>
-          snapshotCounts.some((c) => c.source_name === s.name)
-        ).length;
-        const channelList = companySources.map((s) => channelOf(s.name, company)).join(", ");
-        return `<span class="coverage-item" title="${channelList}"><b>${company}</b> · ${checked}/${companySources.length} pages</span>`;
-      })
-      .join("")}
-  </div>
-
-  <div class="section-title" style="margin-top:36px">What's new right now</div>
+  <div class="section-title" style="margin-top:32px">What's new right now</div>
   <p class="section-intro">Reads each page's current content and pulls out anything the company itself dated recently — works immediately, doesn't depend on this tool having checked before. Best first stop.</p>
   <button class="scan-btn" id="scanBtn" onclick="runScan()" style="margin-bottom:20px">Scan ${SOURCES.length} pages now (~1–2 min)</button>
   <div id="scanResults"></div>
