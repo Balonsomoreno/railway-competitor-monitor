@@ -657,7 +657,7 @@ app.get("/", async (req, res) => {
   </script>
 
   <div class="feed-header" style="margin-top:36px">
-    <div class="section-title" style="margin-bottom:0">Full history</div>
+    <div class="section-title" style="margin-bottom:0">Full change history</div>
   </div>
   <p class="section-intro">Every change caught by the background checker, in order — same source as the signal above, just unsorted. Use the tabs to only look at a certain time range.</p>
 

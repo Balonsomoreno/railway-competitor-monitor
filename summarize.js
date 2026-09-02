@@ -30,15 +30,25 @@ if (!hasApiKey) {
 // hiding it.
 // ---------------------------------------------------------------------
 
-// Crude significance heuristic: longer diffs and diffs containing
-// price/plan-shaped tokens are more likely to be real changes than short
-// copy tweaks. This is intentionally rough — it exists to give the UI
-// *some* signal to color-code by, not to match Claude's judgment.
-function ruleBasedSignificance(addedText) {
-  const lower = addedText.toLowerCase();
+// Crude significance heuristic. Two different things feed this depending
+// on the caller:
+//  - excerptText: the specific text being shown, checked only for
+//    price/plan keywords, since those are meaningful even in a short
+//    excerpt.
+//  - changeSize: how much the page actually grew/changed, in characters
+//    (before.length vs after.length) — this is what should drive
+//    HIGH/MEDIUM/LOW, since a big change is a big change regardless of
+//    which short excerpt we happen to display.
+// Bug this replaces: significance used to be computed from the *excerpt*
+// string's length, but crudeAddedText() deliberately returns one short
+// contiguous run (not the whole diff) — so the length check almost never
+// crossed the HIGH/MEDIUM thresholds no matter how large the real page
+// change was, which is why nearly everything was showing as LOW.
+function ruleBasedSignificance(excerptText, changeSize = 0) {
+  const lower = excerptText.toLowerCase();
   const hasPriceSignal = /\$\d|\bpricing\b|\bplan\b|\bfree tier\b|\bGB\b|\bCPU\b/.test(lower);
-  if (addedText.length > 400 || hasPriceSignal) return "MEDIUM";
-  if (addedText.length > 1500) return "HIGH";
+  if (changeSize > 3000 || hasPriceSignal) return "HIGH";
+  if (changeSize > 600) return "MEDIUM";
   return "LOW";
 }
 
@@ -52,27 +62,57 @@ function ruleBasedSignificance(addedText) {
 // informative regardless of how many different dates it's stamped with.
 //
 // Also filters generic marketing/nav chrome that shows up as "new" text
-// purely because a promo banner rotated or A/B-tested — e.g. Render's
-// careers page briefly diffed as a "MEDIUM significance change" because a
-// migration-credits promo banner sitting inside <main> changed wording
-// between polls, and the crude fallback diff had no way to know that
-// wasn't a real content change. These patterns catch the most common
-// forms of that (generic CTAs, nav labels) without needing to know every
-// site's specific promo copy in advance.
+// purely because a promo banner rotated or A/B-tested. First attempt at
+// this used exact phrases lifted from one real false positive (Render's
+// careers page), which only ever catches that one company's specific
+// wording — Supabase's careers page produced the same class of false
+// positive with completely different text ("Berlin, London Read more
+// Forward-Deployed") and slipped straight through. Replaced with
+// structural heuristics that generalize across companies: short
+// fragments, all-caps/title-case city or CTA lists, and a handful of
+// truly generic verbs common to nav/CTA chrome everywhere, rather than
+// memorizing what any one company's banner happens to say.
 const ROUTINE_NOISE_PATTERNS = [
   /^no incidents reported/i,
   /^all systems operational/i,
   /^\s*update\s*[-—]\s*(we are continuing|we're continuing)/i,
   /^\s*monitoring\s*[-—]/i,
   /^\s*investigating\s*[-—]/i,
-  /^(sign in|get started|apply now|learn more|log ?in|sign ?up)\b/i,
+  /^(sign in|get started|apply now|learn more|log ?in|sign ?up|read more)\b/i,
   /\bmigrat(e|ion) (to|credits)\b/i,
-  /^(migrating|evolve the cloud|elevate your craft)/i,
 ];
+
+// Structural check (not phrase-matching): text that's short, has no
+// terminal punctuation, and mostly consists of Title-Case words reads
+// like a nav/CTA list ("Berlin, London Read more Forward-Deployed") — a
+// real sentence describing a real change almost always ends in a period
+// and isn't dominated by capitalized fragments.
+function looksLikeNavChrome(text) {
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > 160) return false; // real sentences run longer than this
+
+  // Package/version-list chrome (GitHub releases pages, CLI changelogs)
+  // has a distinct shape: repeated @scope/name@version tokens, or a run
+  // of "word/word" package-path fragments — checked separately since it
+  // doesn't fit the "Title Case fragments" pattern below at all.
+  const versionTokenCount = (trimmed.match(/@?[\w-]+\/[\w-]+(@[\d.]+)?/g) || []).length;
+  if (versionTokenCount >= 3) return true;
+
+  if (/[.!?]$/.test(trimmed)) return false; // has a real sentence ending — less likely to be chrome
+  const words = trimmed.split(/\s+/);
+  // Real sentences, even without terminal punctuation, tend to include
+  // lowercase connector words (the, a, for, of, to, and...). Chrome/nav
+  // lists tend to be almost entirely capitalized fragments strung
+  // together with few or no connectors.
+  const connectorWords = words.filter((w) => /^(the|a|an|of|for|to|and|in|on|with|is|are|now|via)$/i.test(w));
+  const titleCaseWords = words.filter((w) => /^[A-Z][a-zA-Z-]*[,.]?$/.test(w));
+  const titleRatio = titleCaseWords.length / words.length;
+  return titleRatio >= 0.6 && connectorWords.length === 0;
+}
 
 function isRoutineNoise(text) {
   const trimmed = text.trim();
-  return ROUTINE_NOISE_PATTERNS.some((pattern) => pattern.test(trimmed));
+  return ROUTINE_NOISE_PATTERNS.some((pattern) => pattern.test(trimmed)) || looksLikeNavChrome(trimmed);
 }
 
 // Rough "what's new" extraction using a real contiguous-block diff instead
@@ -129,6 +169,7 @@ function crudeAddedText(before, after) {
 
 function ruleBasedSummarizeChange({ before, after }) {
   const added = crudeAddedText(before, after);
+  const changeSize = Math.abs((after?.length || 0) - (before?.length || 0));
   if (!added) {
     // The diff was real (hash changed) but everything new was filtered as
     // marketing/nav chrome — most likely a rotating promo banner, not an
@@ -143,7 +184,7 @@ function ruleBasedSummarizeChange({ before, after }) {
   const trimmed = added.length > 220 ? `${added.slice(0, 220)}…` : added;
   return {
     summary: `Content changed (AI summary unavailable — no API credits). Excerpt of new text: "${trimmed}"`,
-    significance: ruleBasedSignificance(added),
+    significance: ruleBasedSignificance(added, changeSize),
   };
 }
 
