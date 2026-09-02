@@ -3,7 +3,7 @@ import express from "express";
 import cron from "node-cron";
 import { pool, initSchema } from "./db.js";
 import { checkAllSources } from "./monitor.js";
-import { SOURCES } from "./sources.js";
+import { SOURCES, CANDIDATE_SOURCES } from "./sources.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -29,6 +29,48 @@ app.get("/api/sources", (req, res) => {
 app.post("/api/check-now", async (req, res) => {
   const results = await checkAllSources();
   res.json({ ranAt: new Date().toISOString(), results });
+});
+
+// Diagnostic: test reachability of every candidate marketing/docs/social
+// source from wherever this app is actually deployed, without writing
+// anything to the DB or adding them to the live monitor list. Use this to
+// see which categories get through Railway's network before promoting any
+// of them into sources.js's SOURCES array.
+app.get("/api/test-candidates", async (req, res) => {
+  const all = Object.entries(CANDIDATE_SOURCES).flatMap(([category, sources]) =>
+    sources.map((s) => ({ ...s, category }))
+  );
+
+  const results = await Promise.all(
+    all.map(async (source) => {
+      try {
+        const res = await fetch(source.url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; RailwayCompetitorMonitor/1.0)",
+          },
+          signal: AbortSignal.timeout(10000),
+        });
+        return {
+          category: source.category,
+          name: source.name,
+          url: source.url,
+          status: res.status,
+          reachable: res.ok,
+        };
+      } catch (err) {
+        return {
+          category: source.category,
+          name: source.name,
+          url: source.url,
+          status: null,
+          reachable: false,
+          error: err.message,
+        };
+      }
+    })
+  );
+
+  res.json({ testedAt: new Date().toISOString(), results });
 });
 
 // --- Dashboard (server-rendered, zero build step) ---
