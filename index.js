@@ -15,9 +15,14 @@ await initSchema();
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
 app.get("/api/changes", async (req, res) => {
-  const { rows } = await pool.query(
-    `SELECT * FROM changes ORDER BY detected_at DESC LIMIT 50`
-  );
+  const { window } = req.query; // "24h" | "7d" | "30d" | undefined (all time)
+  const intervals = { "24h": "24 hours", "7d": "7 days", "30d": "30 days" };
+
+  const query = intervals[window]
+    ? `SELECT * FROM changes WHERE detected_at >= now() - INTERVAL '${intervals[window]}' ORDER BY detected_at DESC LIMIT 200`
+    : `SELECT * FROM changes ORDER BY detected_at DESC LIMIT 200`;
+
+  const { rows } = await pool.query(query);
   res.json(rows);
 });
 
@@ -76,13 +81,30 @@ app.get("/api/test-candidates", async (req, res) => {
 // --- Dashboard (server-rendered, zero build step) ---
 
 app.get("/", async (req, res) => {
-  const { rows: changes } = await pool.query(
-    `SELECT * FROM changes ORDER BY detected_at DESC LIMIT 40`
-  );
+  const activeWindow = ["24h", "7d", "30d"].includes(req.query.window) ? req.query.window : "all";
+  const intervals = { "24h": "24 hours", "7d": "7 days", "30d": "30 days" };
+
+  const changesQuery = intervals[activeWindow]
+    ? `SELECT * FROM changes WHERE detected_at >= now() - INTERVAL '${intervals[activeWindow]}' ORDER BY detected_at DESC LIMIT 100`
+    : `SELECT * FROM changes ORDER BY detected_at DESC LIMIT 100`;
+
+  const { rows: changes } = await pool.query(changesQuery);
   const { rows: snapshotCounts } = await pool.query(
     `SELECT source_name, COUNT(*) as checks, MAX(fetched_at) as last_checked
      FROM snapshots GROUP BY source_name`
   );
+  // Counts per window, independent of which tab is active, so every tab
+  // label can show its own number at once (e.g. "24h (2)") rather than
+  // only revealing counts after you click into a window.
+  const { rows: windowCounts } = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '24 hours') AS h24,
+      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '7 days') AS d7,
+      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '30 days') AS d30,
+      COUNT(*) AS all_time
+    FROM changes
+  `);
+  const counts = windowCounts[0];
 
   // Group sources by company (text before the first space-dash or the
   // first word of the name) so the dashboard reads as "one lane per
@@ -191,13 +213,41 @@ app.get("/", async (req, res) => {
     }
     .coverage-item b { color: var(--ink-soft); font-weight: 600; }
 
+    .feed-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
     .feed-label {
       font-size: 11px;
       font-weight: 650;
       color: var(--ink-faint);
       text-transform: uppercase;
       letter-spacing: 0.06em;
-      margin-bottom: 16px;
+    }
+    .window-tabs {
+      display: flex;
+      gap: 2px;
+      background: var(--paper-raised);
+      border: 1px solid var(--rule);
+      border-radius: 6px;
+      padding: 2px;
+    }
+    .window-tabs a {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--ink-soft);
+      text-decoration: none;
+      padding: 5px 10px;
+      border-radius: 4px;
+    }
+    .window-tabs a:hover { background: var(--structure-soft); }
+    .window-tabs a.active {
+      background: var(--ink);
+      color: var(--paper);
     }
 
     .empty-state {
@@ -263,7 +313,7 @@ app.get("/", async (req, res) => {
   <header>
     <div>
       <h1>Signal</h1>
-      <p class="tagline">Tracking changelog, blog &amp; docs activity across ${companies.length} developer platforms — polled every 6 hours.</p>
+      <p class="tagline">Tracking changelog, blog, docs, status, pricing, jobs &amp; CLI activity across ${companies.length} developer platforms — polled every 6 hours.</p>
     </div>
     <button class="refresh-btn" onclick="this.textContent='Checking…'; this.disabled=true; fetch('/api/check-now',{method:'POST'}).then(()=>location.reload())">Check now</button>
   </header>
@@ -280,11 +330,23 @@ app.get("/", async (req, res) => {
       .join("")}
   </div>
 
-  <div class="feed-label">Recent changes</div>
+  <div class="feed-header">
+    <div class="feed-label">Changes</div>
+    <div class="window-tabs">
+      <a href="/?window=24h" class="${activeWindow === "24h" ? "active" : ""}">24h (${counts.h24})</a>
+      <a href="/?window=7d" class="${activeWindow === "7d" ? "active" : ""}">7d (${counts.d7})</a>
+      <a href="/?window=30d" class="${activeWindow === "30d" ? "active" : ""}">30d (${counts.d30})</a>
+      <a href="/" class="${activeWindow === "all" ? "active" : ""}">All (${counts.all_time})</a>
+    </div>
+  </div>
 
   ${
     changes.length === 0
-      ? `<div class="empty-state"><b>No changes recorded yet.</b><br>Baselines are being established for ${SOURCES.length} sources across ${companies.length} companies. Once a tracked page changes from its baseline, it'll appear here — press "Check now" to poll immediately instead of waiting for the next scheduled run.</div>`
+      ? `<div class="empty-state"><b>${
+          activeWindow === "all"
+            ? "No changes recorded yet."
+            : `No changes in the last ${{ "24h": "24 hours", "7d": "7 days", "30d": "30 days" }[activeWindow]}.`
+        }</b><br>Baselines are being established for ${SOURCES.length} sources across ${companies.length} companies. Once a tracked page changes from its baseline, it'll appear here — press "Check now" to poll immediately instead of waiting for the next scheduled run.</div>`
       : changes
           .map((c) => {
             const sig = sigMeta[c.significance] || sigMeta.LOW;
