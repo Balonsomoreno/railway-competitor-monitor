@@ -1,63 +1,74 @@
 // Sources to monitor. Each entry defines where to look and how to extract
 // meaningful content (selector) so we diff signal, not boilerplate/nav HTML.
 //
-// NOTE ON SOURCE SELECTION: every URL on vercel.com, render.com, fly.io, and
-// x.com/twitter.com returned HTTP 403 when tested from the development
-// sandbox — docs, blog, changelog, RSS feeds, and social profiles alike,
-// uniformly, regardless of path. That pattern (blocked everywhere on a
-// domain, not just one page) points to the sandbox's IP/ASN being blocked
-// by a WAF (e.g. Cloudflare), not those specific pages being protected.
-// Railway's outbound IP is a different network, so these are worth
-// re-testing live — see CANDIDATE_SOURCES below for the higher-signal pages
-// to try swapping in once deployed.
+// SOURCE VERIFICATION HISTORY: every URL on vercel.com, render.com, fly.io
+// returned HTTP 403 when tested from the local development sandbox — but
+// once deployed on Railway, the same URLs all returned 200 (verified via
+// the /api/test-candidates diagnostic endpoint). The 403s were specific to
+// the sandbox's IP/ASN, not the sites themselves — worth remembering as a
+// real data point about scraper accessibility varying by network origin.
 //
-// GitHub release pages were the one category verified reachable from the
-// sandbox, so they're the confirmed baseline tier.
+// This list uses each competitor's official changelog + blog + docs — the
+// highest-signal pages for tracking real product and positioning changes,
+// as opposed to CLI release notes (see CANDIDATE_SOURCES below for those
+// and social, which is still unused).
 export const SOURCES = [
+  // -- Render --
+  { name: "Render Changelog", url: "https://render.com/changelog", selector: "main" },
+  { name: "Render Blog", url: "https://render.com/blog", selector: "main" },
+  { name: "Render Docs", url: "https://render.com/docs", selector: "main" },
+
+  // -- Vercel --
+  { name: "Vercel Changelog", url: "https://vercel.com/changelog", selector: "main" },
+  { name: "Vercel Blog", url: "https://vercel.com/blog", selector: "main" },
+  { name: "Vercel Docs (What's New)", url: "https://vercel.com/docs", selector: "main" },
+
+  // -- Fly.io --
+  { name: "Fly.io Blog", url: "https://fly.io/blog/", selector: "main, article, body" },
+  { name: "Fly.io Docs", url: "https://fly.io/docs/", selector: "main" },
+
+  // -- Heroku --
+  { name: "Heroku Blog", url: "https://blog.heroku.com/", selector: "main, body" },
+
+  // -- Netlify (new) --
+  { name: "Netlify Changelog", url: "https://www.netlify.com/changelog/", selector: "main" },
+  { name: "Netlify Blog", url: "https://www.netlify.com/blog/", selector: "main" },
+
+  // -- Cloudflare Pages (new) --
   {
-    name: "Vercel (vercel CLI releases)",
-    url: "https://github.com/vercel/vercel/releases",
-    selector: ".repository-content, main",
+    name: "Cloudflare Pages Changelog",
+    url: "https://developers.cloudflare.com/changelog/product/pages/",
+    selector: "main, article",
   },
-  {
-    name: "Fly.io (flyctl releases)",
-    url: "https://github.com/superfly/flyctl/releases",
-    selector: ".repository-content, main",
-  },
-  {
-    name: "Render (render-cli releases)",
-    url: "https://github.com/render-oss/cli/releases",
-    selector: ".repository-content, main",
-  },
+  { name: "Cloudflare Blog", url: "https://blog.cloudflare.com/", selector: "main" },
 ];
 
-// Higher-signal marketing/docs/social sources — unverified from the sandbox
-// (all 403'd there), untested against Railway's network. Grouped by category
-// so it's easy to try one category at a time rather than guessing blind.
-// To activate: move entries into SOURCES above, redeploy, check the
-// dashboard's source pills — a pill with a real "checks" count and no
-// "error" status means it got through.
+// Verified reachable (200) from Railway's network via /api/test-candidates,
+// but not yet promoted into SOURCES above.
 export const CANDIDATE_SOURCES = {
-  changelog: [
-    { name: "Render Changelog", url: "https://render.com/changelog", selector: "main" },
-    { name: "Vercel Changelog", url: "https://vercel.com/changelog", selector: "main" },
-  ],
-  blog: [
-    { name: "Render Blog", url: "https://render.com/blog", selector: "main" },
-    { name: "Vercel Blog", url: "https://vercel.com/blog", selector: "main" },
-    { name: "Fly.io Blog", url: "https://fly.io/blog/", selector: "main, article, body" },
-    { name: "Heroku Blog", url: "https://blog.heroku.com/", selector: "main, body" },
-  ],
-  docs: [
-    { name: "Vercel Docs (What's New)", url: "https://vercel.com/docs", selector: "main" },
-    { name: "Render Docs", url: "https://render.com/docs", selector: "main" },
-    { name: "Fly.io Docs", url: "https://fly.io/docs/", selector: "main" },
+  cli_releases: [
+    {
+      name: "Vercel (vercel CLI releases)",
+      url: "https://github.com/vercel/vercel/releases",
+      selector: ".repository-content, main",
+    },
+    {
+      name: "Fly.io (flyctl releases)",
+      url: "https://github.com/superfly/flyctl/releases",
+      selector: ".repository-content, main",
+    },
+    {
+      name: "Render (render-cli releases)",
+      url: "https://github.com/render-oss/cli/releases",
+      selector: ".repository-content, main",
+    },
   ],
   social: [
-    // Twitter/X almost never allows unauthenticated server-side scraping
-    // (separate from the WAF issue — it requires login for most content).
-    // Nitter mirrors are a common workaround but are unreliable/frequently
-    // down; listed here as a known-fragile option, not a first choice.
+    // These return HTTP 200, but X/Twitter requires auth/JS rendering to
+    // surface real post content — a plain fetch likely just diffs on
+    // layout/login-wall noise, not actual tweets. Not promoted for that
+    // reason; would need a different approach (e.g. Nitter mirror, or an
+    // official API) to be genuinely useful.
     { name: "Render (X/Twitter)", url: "https://x.com/render", selector: "main, body" },
     { name: "Vercel (X/Twitter)", url: "https://x.com/vercel", selector: "main, body" },
   ],

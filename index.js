@@ -110,7 +110,7 @@ app.get("/", async (req, res) => {
 </head>
 <body>
   <h1>🚂 Competitor Content Monitor</h1>
-  <div class="sub">Watching Render, Fly.io, Vercel &amp; Heroku for blog/changelog changes — checked every 6 hours via cron.</div>
+  <div class="sub">Watching Render, Vercel, Fly.io, Heroku, Netlify &amp; Cloudflare Pages for changelog/blog/docs changes — checked every 6 hours via cron.</div>
 
   <button onclick="fetch('/api/check-now',{method:'POST'}).then(()=>location.reload())">Check now</button>
 
