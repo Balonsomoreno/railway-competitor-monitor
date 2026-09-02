@@ -2,9 +2,123 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// Whether a real API key is configured. Checked once at startup rather than
+// per-call so a missing/invalid key fails fast and predictably instead of
+// firing 38 individual API calls that each 401. Note: this only confirms a
+// key is *present* — an invalid key (wrong/revoked) still won't be caught
+// until the first real call, which summarizeChange/extractRecentItems
+// handle by falling back to the rule-based path on any API error, not just
+// a missing key. That fallback-on-error behavior is what actually made
+// this tool keep working through the invalid-key incident during
+// development, before the key was diagnosed and swapped for the
+// no-credits fallback below.
+const hasApiKey = Boolean(process.env.ANTHROPIC_API_KEY);
+if (!hasApiKey) {
+  console.warn(
+    "[summarize] No ANTHROPIC_API_KEY set — using rule-based fallback summaries instead of Claude. " +
+      "Set the env var to enable AI-generated summaries and significance ratings."
+  );
+}
+
+// ---------------------------------------------------------------------
+// Rule-based fallbacks (no API cost). Used when hasApiKey is false, or
+// when a live API call fails for any reason (auth, rate limit, network).
+// These are deliberately simple and conservative — they don't try to
+// imitate what Claude would say, they just surface the raw signal (what
+// text is new, what dates are visible) so the tool stays useful without
+// spending API credits, and it's honest about the tradeoff rather than
+// hiding it.
+// ---------------------------------------------------------------------
+
+// Crude significance heuristic: longer diffs and diffs containing
+// price/plan-shaped tokens are more likely to be real changes than short
+// copy tweaks. This is intentionally rough — it exists to give the UI
+// *some* signal to color-code by, not to match Claude's judgment.
+function ruleBasedSignificance(addedText) {
+  const lower = addedText.toLowerCase();
+  const hasPriceSignal = /\$\d|\bpricing\b|\bplan\b|\bfree tier\b|\bGB\b|\bCPU\b/.test(lower);
+  if (addedText.length > 400 || hasPriceSignal) return "MEDIUM";
+  if (addedText.length > 1500) return "HIGH";
+  return "LOW";
+}
+
+// Very rough "what's new" extraction: finds the longest contiguous run of
+// `after` that doesn't appear in `before`, as a stand-in for a real diff
+// algorithm. Not a proper LCS/diff — good enough to show *something*
+// changed without an AI summarizer, not a precise diff tool.
+function crudeAddedText(before, after) {
+  if (!before) return after.slice(0, 300);
+  const beforeWords = new Set(before.split(/\s+/));
+  const afterWords = after.split(/\s+/);
+  const novel = afterWords.filter((w) => !beforeWords.has(w));
+  return novel.slice(0, 60).join(" ") || after.slice(0, 300);
+}
+
+function ruleBasedSummarizeChange({ before, after }) {
+  const added = crudeAddedText(before, after);
+  return {
+    summary: `Page content changed (AI summary unavailable — no API credits). New/changed text includes: "${added.slice(0, 200)}${added.length > 200 ? "…" : ""}"`,
+    significance: ruleBasedSignificance(added),
+  };
+}
+
+// Regex-based date + nearby-text extraction, as a fallback for
+// extractRecentItems(). Looks for common date formats (e.g. "September 01,
+// 2026", "Sep 1, 2026") in the raw text and pulls a short excerpt following
+// each match as a stand-in "summary." Cannot judge whether a date is
+// actually within windowDays with the same nuance an LLM reading full
+// context can — this checks the date against `today` directly, so it's
+// mechanically accurate for dates it successfully parses, but it can't
+// infer relative dates ("last week") the way the AI path could, and it
+// will miss items whose dates are in a format this regex doesn't cover.
+const MONTHS = "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?";
+const DATE_RE = new RegExp(`(${MONTHS})\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})`, "gi");
+const MONTH_INDEX = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+function ruleBasedExtractRecentItems(content, windowDays) {
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
+  const items = [];
+  let match;
+  DATE_RE.lastIndex = 0;
+  while ((match = DATE_RE.exec(content)) !== null) {
+    const [full, monthStr, dayStr, yearStr] = match;
+    const monthKey = monthStr.slice(0, 3).toLowerCase();
+    const monthIdx = MONTH_INDEX[monthKey];
+    if (monthIdx === undefined) continue;
+    const parsedDate = new Date(Number(yearStr), monthIdx, Number(dayStr));
+    if (parsedDate < cutoff || parsedDate > now) continue;
+
+    // Grab a short excerpt of text immediately following the date match as
+    // a crude "what happened" stand-in — this is the raw page text, not an
+    // AI-written summary, so it may run together at word/section
+    // boundaries (no HTML structure survives text extraction). Cut at the
+    // next capital-letter-after-lowercase boundary if one appears early,
+    // as a rough sentence-ish break; otherwise just truncate.
+    const excerptStart = match.index + full.length;
+    let excerpt = content.slice(excerptStart, excerptStart + 220).trim();
+    const sentenceBreak = excerpt.slice(10).search(/[a-z]\.[A-Z]|[a-z](?=[A-Z][a-z])/);
+    if (sentenceBreak > 20) excerpt = excerpt.slice(0, sentenceBreak + 11);
+
+    items.push({
+      dateLabel: full,
+      summary: excerpt || "(no excerpt available)",
+      significance: ruleBasedSignificance(excerpt),
+    });
+  }
+  return items;
+}
+
 // Ask Claude to describe what changed and why a growth/content marketer
-// would care, rather than just returning a raw text diff.
+// would care, rather than just returning a raw text diff. Falls back to a
+// rule-based summary (no API cost) if no key is configured or the call
+// fails for any reason (e.g. invalid key, rate limit).
 export async function summarizeChange({ sourceName, before, after }) {
+  if (!hasApiKey) return ruleBasedSummarizeChange({ before, after });
+
   const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform).
 A page from a competitor ("${sourceName}") has changed. Compare the two snapshots below and:
 1. Summarize what changed in 1-3 sentences, in plain language.
@@ -20,20 +134,25 @@ ${before?.slice(0, 3000) || "(no prior content)"}
 --- AFTER ---
 ${after.slice(0, 3000)}`;
 
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 300,
-    messages: [{ role: "user", content: prompt }],
-  });
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 300,
+      messages: [{ role: "user", content: prompt }],
+    });
 
-  const text = response.content.find((b) => b.type === "text")?.text || "";
-  const summaryMatch = text.match(/SUMMARY:\s*(.+?)(?=\nSIGNIFICANCE:|$)/s);
-  const sigMatch = text.match(/SIGNIFICANCE:\s*(LOW|MEDIUM|HIGH)/i);
+    const text = response.content.find((b) => b.type === "text")?.text || "";
+    const summaryMatch = text.match(/SUMMARY:\s*(.+?)(?=\nSIGNIFICANCE:|$)/s);
+    const sigMatch = text.match(/SIGNIFICANCE:\s*(LOW|MEDIUM|HIGH)/i);
 
-  return {
-    summary: summaryMatch ? summaryMatch[1].trim() : text.trim() || "Change detected (summary unavailable).",
-    significance: sigMatch ? sigMatch[1].toUpperCase() : "LOW",
-  };
+    return {
+      summary: summaryMatch ? summaryMatch[1].trim() : text.trim() || "Change detected (summary unavailable).",
+      significance: sigMatch ? sigMatch[1].toUpperCase() : "LOW",
+    };
+  } catch (err) {
+    console.warn(`[summarize] Claude call failed for "${sourceName}" (${err.message}) — using rule-based fallback.`);
+    return ruleBasedSummarizeChange({ before, after });
+  }
 }
 
 // Reads a single page's CURRENT content and extracts items the page itself
@@ -51,37 +170,11 @@ ${after.slice(0, 3000)}`;
 // JS (not present in server-rendered HTML) or that don't date entries at
 // all will come back empty — that's a real gap, not a silent failure, and
 // the caller should treat an empty result as "couldn't find dated items,"
-// not "confirmed nothing happened."
-// Debug: run extractRecentItems on already-known content and show the RAW
-// Claude response before any parsing, so a parsing bug and a "Claude found
-// nothing" outcome can be told apart on sight.
-export async function debugExtractRecentItems({ sourceName, content, windowDays }) {
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform).
-Below is the current content of a page from a competitor ("${sourceName}"). The page may list changelog entries, blog posts, or other dated items.
-
-Find any items that appear to be dated within the last ${windowDays} days (relative to today, ${todayStr}). For each one you find, output one line in this exact format:
-ITEM: <date if visible, else "undated"> | <1-sentence summary> | <LOW|MEDIUM|HIGH significance>
-
-If the page has no visible dates at all, or nothing appears to fall within the last ${windowDays} days, respond with exactly:
-NONE
-
-Do not guess dates that aren't actually visible in the content. Do not include items you're not reasonably confident are within the window.
-
---- PAGE CONTENT ---
-${content.slice(0, 6000)}`;
-
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 500,
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  const rawText = response.content.find((b) => b.type === "text")?.text || "";
-  return { todayUsedInPrompt: todayStr, promptLength: prompt.length, rawClaudeResponse: rawText };
-}
-
+// not "confirmed nothing happened." Falls back to regex-based date
+// scanning (no API cost) if no key is configured or the call fails.
 export async function extractRecentItems({ sourceName, content, windowDays }) {
+  if (!hasApiKey) return ruleBasedExtractRecentItems(content, windowDays);
+
   const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform).
 Below is the current content of a page from a competitor ("${sourceName}"). The page may list changelog entries, blog posts, or other dated items.
 
@@ -96,25 +189,80 @@ Do not guess dates that aren't actually visible in the content. Do not include i
 --- PAGE CONTENT ---
 ${content.slice(0, 6000)}`;
 
-  const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 500,
-    messages: [{ role: "user", content: prompt }],
-  });
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 500,
+      messages: [{ role: "user", content: prompt }],
+    });
 
-  const text = response.content.find((b) => b.type === "text")?.text || "";
-  if (/^\s*NONE\s*$/i.test(text.trim())) return [];
+    const text = response.content.find((b) => b.type === "text")?.text || "";
+    if (/^\s*NONE\s*$/i.test(text.trim())) return [];
 
-  const items = [];
-  for (const line of text.split("\n")) {
-    const match = line.match(/^ITEM:\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(LOW|MEDIUM|HIGH)\s*$/i);
-    if (match) {
-      items.push({
-        dateLabel: match[1].trim(),
-        summary: match[2].trim(),
-        significance: match[3].toUpperCase(),
-      });
+    const items = [];
+    for (const line of text.split("\n")) {
+      const match = line.match(/^ITEM:\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(LOW|MEDIUM|HIGH)\s*$/i);
+      if (match) {
+        items.push({
+          dateLabel: match[1].trim(),
+          summary: match[2].trim(),
+          significance: match[3].toUpperCase(),
+        });
+      }
     }
+    return items;
+  } catch (err) {
+    console.warn(`[summarize] Claude call failed for "${sourceName}" (${err.message}) — using rule-based fallback.`);
+    return ruleBasedExtractRecentItems(content, windowDays);
   }
-  return items;
+}
+
+// Debug: run extractRecentItems on already-known content and show the RAW
+// Claude response before any parsing, so a parsing bug and a "Claude found
+// nothing" outcome can be told apart on sight. Does NOT fall back silently
+// — surfaces the raw error or the rule-based result explicitly, since this
+// endpoint exists specifically to diagnose problems, not paper over them.
+export async function debugExtractRecentItems({ sourceName, content, windowDays }) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  if (!hasApiKey) {
+    return {
+      hasApiKey: false,
+      todayUsedInPrompt: todayStr,
+      note: "No ANTHROPIC_API_KEY configured — showing rule-based fallback result instead of a Claude call.",
+      ruleBasedResult: ruleBasedExtractRecentItems(content, windowDays),
+    };
+  }
+
+  const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform).
+Below is the current content of a page from a competitor ("${sourceName}"). The page may list changelog entries, blog posts, or other dated items.
+
+Find any items that appear to be dated within the last ${windowDays} days (relative to today, ${todayStr}). For each one you find, output one line in this exact format:
+ITEM: <date if visible, else "undated"> | <1-sentence summary> | <LOW|MEDIUM|HIGH significance>
+
+If the page has no visible dates at all, or nothing appears to fall within the last ${windowDays} days, respond with exactly:
+NONE
+
+Do not guess dates that aren't actually visible in the content. Do not include items you're not reasonably confident are within the window.
+
+--- PAGE CONTENT ---
+${content.slice(0, 6000)}`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 500,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const rawText = response.content.find((b) => b.type === "text")?.text || "";
+    return { hasApiKey: true, todayUsedInPrompt: todayStr, promptLength: prompt.length, rawClaudeResponse: rawText };
+  } catch (err) {
+    return {
+      hasApiKey: true,
+      todayUsedInPrompt: todayStr,
+      apiError: err.message,
+      note: "API key is configured but the call failed (see apiError). Showing rule-based fallback result too.",
+      ruleBasedResult: ruleBasedExtractRecentItems(content, windowDays),
+    };
+  }
 }
