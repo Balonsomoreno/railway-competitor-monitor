@@ -345,19 +345,19 @@ app.get("/", async (req, res) => {
       color: var(--paper);
     }
 
-    .scan-btn {
-      display: inline-block;
-      background: var(--structure);
-      color: var(--paper);
-      border: none;
+    .check-now-btn {
+      background: none;
+      border: 1px solid var(--rule);
+      color: var(--ink-soft);
       font-family: var(--sans);
-      font-size: 12.5px;
-      font-weight: 600;
-      padding: 7px 14px;
+      font-size: 12px;
+      font-weight: 550;
+      padding: 6px 12px;
       border-radius: 6px;
       cursor: pointer;
     }
-    .scan-btn:disabled { opacity: 0.6; cursor: default; }
+    .check-now-btn:hover { border-color: var(--ink-faint); color: var(--ink); }
+    .check-now-btn:disabled { opacity: 0.6; cursor: default; }
 
     .empty-state {
       border: 1px dashed var(--rule);
@@ -454,7 +454,7 @@ app.get("/", async (req, res) => {
       <h1>Competitor Watch</h1>
       <p class="tagline">Built to answer "what have our competitors done recently?" Competitor Watch automatically checks changelogs, blogs, docs, status pages, pricing, and job listings across ${companies.length} developer platforms, every 6 hours, to keep a running log of competitor intelligence.</p>
     </div>
-    <button class="refresh-btn" onclick="this.textContent='Checking…'; this.disabled=true; fetch('/api/check-now',{method:'POST'}).then(()=>location.reload())">Check now</button>
+    <button class="refresh-btn" id="scanBtn" onclick="runScan()">Scan ${SOURCES.length} pages now</button>
   </header>
 
   <details class="sources-details">
@@ -475,8 +475,7 @@ app.get("/", async (req, res) => {
   </details>
 
   <div class="section-title" style="margin-top:32px">What's new right now</div>
-  <p class="section-intro">Reads each page's current content and pulls out anything the company itself dated recently — works immediately, doesn't depend on this tool having checked before. Best first stop.</p>
-  <button class="scan-btn" id="scanBtn" onclick="runScan()" style="margin-bottom:20px">Scan ${SOURCES.length} pages now (~1–2 min)</button>
+  <p class="section-intro">Reads each page's current content and pulls out anything the company itself dated recently — works immediately, doesn't depend on this tool having checked before. Best first stop. (Takes ~1–2 min to scan all ${SOURCES.length} sources — use the button up top.)</p>
   <div id="scanResults"></div>
 
   <script>
@@ -515,12 +514,15 @@ app.get("/", async (req, res) => {
       }
 
       btn.disabled = false;
-      btn.textContent = 'Scan ${SOURCES.length} pages now (~1–2 min)';
+      btn.textContent = 'Scan ${SOURCES.length} pages now';
     }
   </script>
 
-  <div class="section-title" style="margin-top:36px">Changes since last check</div>
-  <p class="section-intro">A background job checks every page every 6 hours and logs it here the moment something differs from last time. Complements the scan above: this can catch changes the moment they happen, but it's blind to anything that happened before this tool started watching, or between checks if something changed and changed back.</p>
+  <div class="feed-header" style="margin-top:36px">
+    <div class="section-title" style="margin-bottom:0">Changes since last check</div>
+    <button class="check-now-btn" onclick="this.textContent='Checking…'; this.disabled=true; fetch('/api/check-now',{method:'POST'}).then(()=>location.reload())">Check now</button>
+  </div>
+  <p class="section-intro">A background job checks every page every 6 hours and logs it here the moment something differs from last time. Complements the scan above: this can catch changes the moment they happen, but it's blind to anything that happened before this tool started watching, or between checks if something changed and changed back. Use "Check now" to poll immediately instead of waiting for the next scheduled run.</p>
 
   <div class="feed-header">
     <div class="window-tabs">
