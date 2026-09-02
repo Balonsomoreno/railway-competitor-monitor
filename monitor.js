@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import crypto from "crypto";
 import { pool } from "./db.js";
 import { SOURCES } from "./sources.js";
-import { summarizeChange } from "./summarize.js";
+import { summarizeChange, extractRecentItems } from "./summarize.js";
 
 function hash(text) {
   return crypto.createHash("sha256").update(text).digest("hex");
@@ -105,6 +105,36 @@ export async function checkAllSources() {
       results.push(result);
     } catch (err) {
       results.push({ source: source.name, status: "error", error: err.message });
+    }
+  }
+  return results;
+}
+
+// Scans every source's CURRENT content for items the page itself dates
+// within `windowDays` — independent of this tool's poll/change history. See
+// the long comment on extractRecentItems() in summarize.js for why this
+// exists as a separate path from checkAllSources()/checkSource() above:
+// hash-diffing only ever reports "changed since last poll," which is blind
+// to real, recent updates on pages this tool hasn't polled through yet, or
+// pages that update less often than the poll interval.
+//
+// This does NOT write to the snapshots/changes tables — it's a read-only
+// scan for display purposes, so it can't corrupt the change-detection
+// history, and can safely be run as often as wanted without side effects.
+export async function scanRecentAcrossSources(windowDays) {
+  const results = [];
+  for (const source of SOURCES) {
+    try {
+      const html = await fetchSource(source);
+      const text = extractText(html, source.selector);
+      const items = await extractRecentItems({ sourceName: source.name, content: text, windowDays });
+      results.push({
+        source: source.name,
+        url: source.url,
+        items,
+      });
+    } catch (err) {
+      results.push({ source: source.name, url: source.url, items: [], error: err.message });
     }
   }
   return results;

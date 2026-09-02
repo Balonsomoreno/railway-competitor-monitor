@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
 import { pool, initSchema } from "./db.js";
-import { checkAllSources } from "./monitor.js";
+import { checkAllSources, scanRecentAcrossSources } from "./monitor.js";
 import { SOURCES, CANDIDATE_SOURCES } from "./sources.js";
 
 const app = express();
@@ -34,6 +34,22 @@ app.get("/api/sources", (req, res) => {
 app.post("/api/check-now", async (req, res) => {
   const results = await checkAllSources();
   res.json({ ranAt: new Date().toISOString(), results });
+});
+
+// Live scan: reads every source's CURRENT content right now and asks Claude
+// to pull out anything the page itself dates within the requested window.
+// This is the fix for the gap where checkAllSources() only ever reports
+// "changed since the last poll" — with a 6-hour cron and companies that
+// don't publish daily, that can mean days of silence even though real,
+// recent, dated content already sits on the page. This endpoint answers
+// "what does the page say happened recently" directly, independent of poll
+// history. Slower and more expensive than /api/check-now (38 fetches + 38
+// Claude calls), so it's a separate explicit action, not run on every page
+// load.
+app.get("/api/scan-recent", async (req, res) => {
+  const windowDays = { "24h": 1, "7d": 7, "30d": 30 }[req.query.window] || 7;
+  const results = await scanRecentAcrossSources(windowDays);
+  res.json({ scannedAt: new Date().toISOString(), windowDays, results });
 });
 
 // Diagnostic: test reachability of every candidate marketing/docs/social
@@ -250,6 +266,31 @@ app.get("/", async (req, res) => {
       color: var(--paper);
     }
 
+    .scan-note {
+      font-size: 12.5px;
+      color: var(--ink-soft);
+      line-height: 1.6;
+      background: var(--structure-soft);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 8px;
+    }
+    .scan-note b { color: var(--ink); }
+    .scan-btn {
+      display: block;
+      margin-top: 10px;
+      background: var(--structure);
+      color: var(--paper);
+      border: none;
+      font-family: var(--sans);
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 7px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .scan-btn:disabled { opacity: 0.6; cursor: default; }
+
     .empty-state {
       border: 1px dashed var(--rule);
       border-radius: 8px;
@@ -339,6 +380,52 @@ app.get("/", async (req, res) => {
       <a href="/" class="${activeWindow === "all" ? "active" : ""}">All (${counts.all_time})</a>
     </div>
   </div>
+
+  <div class="scan-note">
+    <b>Note:</b> the tabs above show what this tool has <em>detected</em> since it started polling — not necessarily everything each company actually published in that window (6-hour poll cycle, started ${new Date().toDateString()}). To check pages directly for recent dated items regardless of poll history, use:
+    <button class="scan-btn" id="scanBtn" onclick="runScan()">Scan pages now (~1–2 min)</button>
+  </div>
+  <div id="scanResults"></div>
+
+  <script>
+    async function runScan() {
+      const btn = document.getElementById('scanBtn');
+      const resultsEl = document.getElementById('scanResults');
+      const windowParam = new URLSearchParams(location.search).get('window') || 'all';
+      const scanWindow = ['24h', '7d', '30d'].includes(windowParam) ? windowParam : '7d';
+
+      btn.disabled = true;
+      btn.textContent = 'Scanning ' + ${SOURCES.length} + ' pages…';
+      resultsEl.innerHTML = '';
+
+      try {
+        const res = await fetch('/api/scan-recent?window=' + scanWindow);
+        const data = await res.json();
+        const withItems = data.results.filter(r => r.items && r.items.length > 0);
+
+        if (withItems.length === 0) {
+          resultsEl.innerHTML = '<div class="empty-state"><b>No dated items found in the last ' + data.windowDays + ' days.</b><br>Either nothing was published in that window, or the pages do not show visible dates this tool could read.</div>';
+        } else {
+          resultsEl.innerHTML = withItems.map(r =>
+            r.items.map(item => {
+              const sigColors = { HIGH: '#C77D2E', MEDIUM: '#8A6A3D', LOW: '#8C8C88' };
+              const sigLabels = { HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low' };
+              const color = sigColors[item.significance] || sigColors.LOW;
+              const label = sigLabels[item.significance] || 'Low';
+              return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><a href="' + r.url + '" target="_blank" rel="noopener">' + r.source + '</a></div><div class="row-summary">' + item.summary + '</div></div><div class="row-time">' + item.dateLabel + '</div></div>';
+            }).join('')
+          ).join('');
+        }
+      } catch (err) {
+        resultsEl.innerHTML = '<div class="empty-state"><b>Scan failed.</b><br>' + err.message + '</div>';
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Scan pages now (~1–2 min)';
+    }
+  </script>
+
+  <div class="feed-label" style="margin-top:32px">Detected changes</div>
 
   ${
     changes.length === 0
