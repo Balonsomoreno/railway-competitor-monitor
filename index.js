@@ -553,12 +553,11 @@ app.get("/", async (req, res) => {
   </header>
 
   <div class="signal-section">
-    <div class="section-title" style="margin-bottom:4px">This week's signal</div>
-    <p class="section-intro" style="margin-bottom:8px">The most significant items found across all ${SOURCES.length} sources, grouped by competitor. Press "Check for updates" above to refresh.</p>
+    <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
+    <p class="section-intro" style="margin-bottom:8px">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out. Press "Check for updates" above to refresh.</p>
     <p class="sig-legend" style="margin-bottom:16px">
-      <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — likely a real product, pricing, or positioning move</span>
-      <span class="sig-legend-item"><span class="sig-dot" style="background:#8A6A3D"></span>Medium — worth a glance</span>
-      <span class="sig-legend-item"><span class="sig-dot" style="background:#8C8C88"></span>Low — minor or routine</span>
+      <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — pricing, breaking changes, or a major move</span>
+      <span class="sig-legend-item"><span class="sig-dot" style="background:#8A6A3D"></span>Medium — a real launch or update worth a glance</span>
     </p>
     <div id="signalResults"><p class="signal-empty">Press "Check for updates" to pull the latest.</p></div>
   </div>
@@ -597,7 +596,7 @@ app.get("/", async (req, res) => {
       const btn = document.getElementById('scanBtn');
       const resultsEl = document.getElementById('signalResults');
       const windowParam = new URLSearchParams(location.search).get('window') || 'all';
-      const scanWindow = ['24h', '7d', '30d'].includes(windowParam) ? windowParam : '7d';
+      const scanWindow = ['24h', '7d', '30d'].includes(windowParam) ? windowParam : '30d';
 
       btn.disabled = true;
       btn.textContent = 'Checking ' + ${SOURCES.length} + ' sources…';
@@ -605,19 +604,24 @@ app.get("/", async (req, res) => {
       try {
         const res = await fetch('/api/refresh-all?window=' + scanWindow);
         const data = await res.json();
+        // Only HIGH/MEDIUM surface here — this section is meant to be a
+        // short, meaningful list, not everything that technically
+        // changed. LOW-significance items (routine status updates, minor
+        // copy tweaks) still exist in "Full change history" below.
+        const notable = data.items.filter(item => item.significance === 'HIGH' || item.significance === 'MEDIUM');
 
-        if (data.items.length === 0) {
-          resultsEl.innerHTML = '<p class="signal-empty">Nothing new found. Either nothing changed, or these pages do not show dates this tool could read.</p>';
+        if (notable.length === 0) {
+          resultsEl.innerHTML = '<p class="signal-empty">Nothing notable in the last 30 days. Check "Full change history" below for the complete log, including routine updates.</p>';
         } else {
-          const sigColors = { HIGH: '#C77D2E', MEDIUM: '#8A6A3D', LOW: '#8C8C88' };
-          const sigLabels = { HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low' };
-          const sigRank = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+          const sigColors = { HIGH: '#C77D2E', MEDIUM: '#8A6A3D' };
+          const sigLabels = { HIGH: 'High', MEDIUM: 'Medium' };
+          const sigRank = { HIGH: 3, MEDIUM: 2 };
 
           const renderRow = (item) => {
             const company = item.source.split(' ')[0];
             const channel = item.source.slice(company.length).trim() || 'Page';
-            const color = sigColors[item.significance] || sigColors.LOW;
-            const label = sigLabels[item.significance] || 'Low';
+            const color = sigColors[item.significance] || sigColors.MEDIUM;
+            const label = sigLabels[item.significance] || 'Medium';
             return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + item.url + '" target="_blank" rel="noopener" class="row-summary-link">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
           };
 
@@ -625,7 +629,7 @@ app.get("/", async (req, res) => {
           // competitor did," not one flat list a person has to mentally
           // re-sort by company themselves.
           const byCompany = {};
-          for (const item of data.items) {
+          for (const item of notable) {
             const company = item.source.split(' ')[0];
             (byCompany[company] = byCompany[company] || []).push(item);
           }

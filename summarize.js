@@ -44,11 +44,35 @@ if (!hasApiKey) {
 // contiguous run (not the whole diff) — so the length check almost never
 // crossed the HIGH/MEDIUM thresholds no matter how large the real page
 // change was, which is why nearly everything was showing as LOW.
+// Crude significance heuristic. Two call sites feed this with different
+// signals available to them:
+//  - The poll/diff path (ruleBasedSummarizeChange) has a real before/after
+//    size to measure — passed as changeSize.
+//  - The live-scan path (ruleBasedExtractRecentItems) has no diff at all,
+//    just a short excerpt of text near a date — it has no changeSize to
+//    give, and previously called this with no second argument, silently
+//    defaulting to 0. That meant scanned items could ONLY ever reach HIGH
+//    via a price-keyword match, never via content substance, which is why
+//    "This Week's Signal" (populated mostly by the scan path) was showing
+//    almost nothing above LOW even for what read as real news.
+// Fix: add keyword categories beyond pricing (new features/launches,
+// notable numbers, breaking changes) so the scan path has a real way to
+// reach MEDIUM/HIGH from content alone, not just diff size it doesn't have.
 function ruleBasedSignificance(excerptText, changeSize = 0) {
   const lower = excerptText.toLowerCase();
-  const hasPriceSignal = /\$\d|\bpricing\b|\bplan\b|\bfree tier\b|\bGB\b|\bCPU\b/.test(lower);
-  if (changeSize > 3000 || hasPriceSignal) return "HIGH";
-  if (changeSize > 600) return "MEDIUM";
+
+  const hasPriceSignal = /\$\d|\bpricing\b|\bfree tier\b|\bdiscount(ed)?\b|% off\b/.test(lower);
+  const hasLaunchSignal =
+    /\b(now available|launched?|introduc(ed|ing)|announc(ed|ing)|generally available|\bga\b|new (feature|plan|region|model))\b/.test(
+      lower
+    );
+  const hasBreakingSignal = /\b(deprecat|breaking change|sunset|end of life|migration required|no longer support)/.test(
+    lower
+  );
+  const hasNotableNumber = /\b\d{2,}%|\b\d+x faster|\b\d+x (cheaper|slower)/.test(lower);
+
+  if (hasPriceSignal || hasBreakingSignal || changeSize > 3000) return "HIGH";
+  if (hasLaunchSignal || hasNotableNumber || changeSize > 600) return "MEDIUM";
   return "LOW";
 }
 
