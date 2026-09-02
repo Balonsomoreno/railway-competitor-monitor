@@ -9,7 +9,7 @@ function hash(text) {
 }
 
 // Strip tags, collapse whitespace -> normalized text we can hash + diff.
-function extractText(html, selector) {
+export function extractText(html, selector) {
   const $ = cheerio.load(html);
   const selectors = selector.split(",").map((s) => s.trim());
   let node = null;
@@ -24,7 +24,7 @@ function extractText(html, selector) {
   return target.text().replace(/\s+/g, " ").trim();
 }
 
-async function fetchSource(source) {
+export async function fetchSource(source) {
   const res = await fetch(source.url, {
     headers: {
       "User-Agent":

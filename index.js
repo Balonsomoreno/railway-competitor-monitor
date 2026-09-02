@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
 import { pool, initSchema } from "./db.js";
-import { checkAllSources, scanRecentAcrossSources } from "./monitor.js";
+import { checkAllSources, scanRecentAcrossSources, fetchSource, extractText } from "./monitor.js";
 import { SOURCES, CANDIDATE_SOURCES } from "./sources.js";
 
 const app = express();
@@ -50,6 +50,39 @@ app.get("/api/scan-recent", async (req, res) => {
   const windowDays = { "24h": 1, "7d": 7, "30d": 30 }[req.query.window] || 7;
   const results = await scanRecentAcrossSources(windowDays);
   res.json({ scannedAt: new Date().toISOString(), windowDays, results });
+});
+
+// Debug: show exactly what one source's extraction pipeline actually sees,
+// step by step. Built specifically to answer "why did scan-recent come back
+// empty" — rather than guess between (a) the page has no visible dates,
+// (b) content got cut off by the 6000-char limit sent to Claude, (c) the
+// selector is grabbing the wrong part of the page, or (d) something else,
+// this shows the real extracted text so it can be read directly. Takes a
+// `source` query param matching a name in SOURCES exactly (case-sensitive).
+app.get("/api/debug-source", async (req, res) => {
+  const source = SOURCES.find((s) => s.name === req.query.source);
+  if (!source) {
+    return res.status(404).json({
+      error: "No source with that exact name.",
+      hint: "Pass ?source=<exact name>, e.g. ?source=Render%20Changelog",
+      availableNames: SOURCES.map((s) => s.name),
+    });
+  }
+  try {
+    const html = await fetchSource(source);
+    const text = extractText(html, source.selector);
+    res.json({
+      source: source.name,
+      url: source.url,
+      selector: source.selector,
+      rawHtmlLength: html.length,
+      extractedTextLength: text.length,
+      extractedTextFirst6000Chars: text.slice(0, 6000), // exactly what extractRecentItems() actually sees
+      extractedTextFull: text, // for checking whether relevant content got truncated
+    });
+  } catch (err) {
+    res.status(500).json({ source: source.name, url: source.url, error: err.message });
+  }
 });
 
 // Diagnostic: test reachability of every candidate marketing/docs/social
