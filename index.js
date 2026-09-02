@@ -4,7 +4,7 @@ import cron from "node-cron";
 import { pool, initSchema } from "./db.js";
 import { checkAllSources, scanRecentAcrossSources, fetchSource, extractText } from "./monitor.js";
 import { debugExtractRecentItems } from "./summarize.js";
-import { SOURCES, CANDIDATE_SOURCES } from "./sources.js";
+import { SOURCES, CANDIDATE_SOURCES, COMPANY_HOMEPAGES } from "./sources.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -302,6 +302,8 @@ app.get("/", async (req, res) => {
       margin-bottom: 4px;
     }
     .coverage-item-head b { color: var(--ink); font-weight: 700; }
+    .coverage-company-link { color: inherit; text-decoration: none; }
+    .coverage-company-link:hover { text-decoration: underline; }
     .coverage-item-channels {
       color: var(--ink-faint);
       font-size: 10.5px;
@@ -454,7 +456,7 @@ app.get("/", async (req, res) => {
       <h1>Competitor Watch</h1>
       <p class="tagline">Built to answer "what have our competitors done recently?" Competitor Watch automatically checks changelogs, blogs, docs, status pages, pricing, and job listings across ${companies.length} developer platforms, every 6 hours, to keep a running log of competitor intelligence.</p>
     </div>
-    <button class="refresh-btn" id="scanBtn" onclick="runScan()">Scan ${SOURCES.length} pages now</button>
+    <button class="refresh-btn" id="scanBtn" onclick="runScan()">Run scan now</button>
   </header>
 
   <details class="sources-details">
@@ -468,17 +470,22 @@ app.get("/", async (req, res) => {
             snapshotCounts.some((c) => c.source_name === s.name)
           ).length;
           const channelList = companySources.map((s) => channelOf(s.name, company)).join(" · ");
-          return `<div class="coverage-item"><div class="coverage-item-head"><b>${company}</b><span>${checked}/${companySources.length} sources</span></div><div class="coverage-item-channels">${channelList}</div></div>`;
+          const homepage = COMPANY_HOMEPAGES[company];
+          const companyLabel = homepage
+            ? `<a href="${homepage}" target="_blank" rel="noopener" class="coverage-company-link">${company}</a>`
+            : company;
+          return `<div class="coverage-item"><div class="coverage-item-head"><b>${companyLabel}</b><span>${checked}/${companySources.length} sources</span></div><div class="coverage-item-channels">${channelList}</div></div>`;
         })
         .join("")}
     </div>
   </details>
 
   <div class="section-title" style="margin-top:32px">What's new right now</div>
-  <p class="section-intro">Reads each page's current content and pulls out anything the company itself dated recently — works immediately, doesn't depend on this tool having checked before. Best first stop. (Takes ~1–2 min to scan all ${SOURCES.length} sources — use the button up top.)</p>
-  <div id="scanResults"></div>
+  <div id="scanResults"><p class="section-intro">Press "Run scan now" above to check all ${SOURCES.length} sources for recent activity.</p></div>
 
   <script>
+    const COMPANY_HOMEPAGES = ${JSON.stringify(COMPANY_HOMEPAGES)};
+
     async function runScan() {
       const btn = document.getElementById('scanBtn');
       const resultsEl = document.getElementById('scanResults');
@@ -500,12 +507,16 @@ app.get("/", async (req, res) => {
           resultsEl.innerHTML = withItems.map(r => {
             const company = r.source.split(' ')[0];
             const channel = r.source.slice(company.length).trim() || 'Page';
+            const homepage = COMPANY_HOMEPAGES[company];
+            const companyLabel = homepage
+              ? '<a href="' + homepage + '" target="_blank" rel="noopener" class="coverage-company-link">' + company + '</a>'
+              : company;
             return r.items.map(item => {
               const sigColors = { HIGH: '#C77D2E', MEDIUM: '#8A6A3D', LOW: '#8C8C88' };
               const sigLabels = { HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low' };
               const color = sigColors[item.significance] || sigColors.LOW;
               const label = sigLabels[item.significance] || 'Low';
-              return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-company">' + company + '</span><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + r.url + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
+              return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-company">' + companyLabel + '</span><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + r.url + '" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
             }).join('');
           }).join('');
         }
@@ -522,7 +533,7 @@ app.get("/", async (req, res) => {
     <div class="section-title" style="margin-bottom:0">Changes since last check</div>
     <button class="check-now-btn" onclick="this.textContent='Checking…'; this.disabled=true; fetch('/api/check-now',{method:'POST'}).then(()=>location.reload())">Check now</button>
   </div>
-  <p class="section-intro">A background job checks every page every 6 hours and logs it here the moment something differs from last time. Complements the scan above: this can catch changes the moment they happen, but it's blind to anything that happened before this tool started watching, or between checks if something changed and changed back. Use "Check now" to poll immediately instead of waiting for the next scheduled run.</p>
+  <p class="section-intro">Auto-checked every 6 hours in the background — press "Check now" to poll immediately instead.</p>
 
   <div class="feed-header">
     <div class="window-tabs">
@@ -545,11 +556,15 @@ app.get("/", async (req, res) => {
             const sig = sigMeta[c.significance] || sigMeta.LOW;
             const company = companyOf(c.source_name);
             const channel = channelOf(c.source_name, company);
+            const homepage = COMPANY_HOMEPAGES[company];
+            const companyLabel = homepage
+              ? `<a href="${homepage}" target="_blank" rel="noopener" class="coverage-company-link">${company}</a>`
+              : company;
             return `
     <div class="row">
       <div class="row-sig" style="color:${sig.color}">${sig.label}</div>
       <div class="row-body">
-        <div class="row-source"><span class="row-company">${company}</span><span class="row-channel">${channel}</span></div>
+        <div class="row-source"><span class="row-company">${companyLabel}</span><span class="row-channel">${channel}</span></div>
         <div class="row-summary"><a href="${c.url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${c.summary}</a></div>
       </div>
       <div class="row-time">${timeAgo(c.detected_at)}</div>

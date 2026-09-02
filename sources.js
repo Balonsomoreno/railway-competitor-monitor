@@ -34,6 +34,22 @@
 // login-wall noise) and HN/Reddit mentions (structurally not a "diff a
 // page" problem — needs the HN Algolia API filtering by post creation
 // time, not page-content hashing; not implemented).
+// Homepage URL for each company tracked in SOURCES, keyed by the same
+// "company" string the dashboard derives from source names (the first
+// word/token). Kept as an explicit map rather than derived from source
+// URLs because several sources point at subdomains (status.render.com,
+// github.com/...) that aren't the company's actual homepage.
+export const COMPANY_HOMEPAGES = {
+  Render: "https://render.com",
+  Vercel: "https://vercel.com",
+  "Fly.io": "https://fly.io",
+  Heroku: "https://www.heroku.com",
+  Netlify: "https://www.netlify.com",
+  Cloudflare: "https://www.cloudflare.com",
+  Supabase: "https://supabase.com",
+  Northflank: "https://northflank.com",
+};
+
 export const SOURCES = [
   // ============================== RENDER ==============================
   { name: "Render Changelog", url: "https://render.com/changelog", selector: "main" },
