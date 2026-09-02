@@ -52,6 +52,35 @@ ${after.slice(0, 3000)}`;
 // all will come back empty — that's a real gap, not a silent failure, and
 // the caller should treat an empty result as "couldn't find dated items,"
 // not "confirmed nothing happened."
+// Debug: run extractRecentItems on already-known content and show the RAW
+// Claude response before any parsing, so a parsing bug and a "Claude found
+// nothing" outcome can be told apart on sight.
+export async function debugExtractRecentItems({ sourceName, content, windowDays }) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform).
+Below is the current content of a page from a competitor ("${sourceName}"). The page may list changelog entries, blog posts, or other dated items.
+
+Find any items that appear to be dated within the last ${windowDays} days (relative to today, ${todayStr}). For each one you find, output one line in this exact format:
+ITEM: <date if visible, else "undated"> | <1-sentence summary> | <LOW|MEDIUM|HIGH significance>
+
+If the page has no visible dates at all, or nothing appears to fall within the last ${windowDays} days, respond with exactly:
+NONE
+
+Do not guess dates that aren't actually visible in the content. Do not include items you're not reasonably confident are within the window.
+
+--- PAGE CONTENT ---
+${content.slice(0, 6000)}`;
+
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 500,
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  const rawText = response.content.find((b) => b.type === "text")?.text || "";
+  return { todayUsedInPrompt: todayStr, promptLength: prompt.length, rawClaudeResponse: rawText };
+}
+
 export async function extractRecentItems({ sourceName, content, windowDays }) {
   const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform).
 Below is the current content of a page from a competitor ("${sourceName}"). The page may list changelog entries, blog posts, or other dated items.

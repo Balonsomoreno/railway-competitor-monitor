@@ -3,6 +3,7 @@ import express from "express";
 import cron from "node-cron";
 import { pool, initSchema } from "./db.js";
 import { checkAllSources, scanRecentAcrossSources, fetchSource, extractText } from "./monitor.js";
+import { debugExtractRecentItems } from "./summarize.js";
 import { SOURCES, CANDIDATE_SOURCES } from "./sources.js";
 
 const app = express();
@@ -71,6 +72,14 @@ app.get("/api/debug-source", async (req, res) => {
   try {
     const html = await fetchSource(source);
     const text = extractText(html, source.selector);
+    const windowDays = { "24h": 1, "7d": 7, "30d": 30 }[req.query.window] || 7;
+    // Also run the actual Claude extraction and return its RAW response, so
+    // a parsing bug and "Claude genuinely found nothing" can be told apart.
+    const claudeDebug = await debugExtractRecentItems({
+      sourceName: source.name,
+      content: text,
+      windowDays,
+    });
     res.json({
       source: source.name,
       url: source.url,
@@ -78,7 +87,7 @@ app.get("/api/debug-source", async (req, res) => {
       rawHtmlLength: html.length,
       extractedTextLength: text.length,
       extractedTextFirst6000Chars: text.slice(0, 6000), // exactly what extractRecentItems() actually sees
-      extractedTextFull: text, // for checking whether relevant content got truncated
+      claudeDebug, // { todayUsedInPrompt, promptLength, rawClaudeResponse }
     });
   } catch (err) {
     res.status(500).json({ source: source.name, url: source.url, error: err.message });
