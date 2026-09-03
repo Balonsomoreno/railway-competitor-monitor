@@ -226,9 +226,15 @@ app.get("/", async (req, res) => {
   const activeWindow = ["24h", "7d", "30d"].includes(req.query.window) ? req.query.window : "all";
   const intervals = { "24h": "24 hours", "7d": "7 days", "30d": "30 days" };
 
+  // LOW-significance rows are routine noise (minor copy tweaks, nav
+  // chrome that survived filtering) and get excluded from Full change
+  // history entirely, not just hidden client-side — they're still
+  // detected and stored (so nothing is lost from the underlying data),
+  // just not surfaced in this view. This matches "Latest competitive
+  // signals" above, which applies the same HIGH/MEDIUM-only filter.
   const changesQuery = intervals[activeWindow]
-    ? `SELECT * FROM changes WHERE detected_at >= now() - INTERVAL '${intervals[activeWindow]}' ORDER BY detected_at DESC LIMIT 100`
-    : `SELECT * FROM changes ORDER BY detected_at DESC LIMIT 100`;
+    ? `SELECT * FROM changes WHERE detected_at >= now() - INTERVAL '${intervals[activeWindow]}' AND significance != 'LOW' ORDER BY detected_at DESC LIMIT 100`
+    : `SELECT * FROM changes WHERE significance != 'LOW' ORDER BY detected_at DESC LIMIT 100`;
 
   const { rows: changes } = await pool.query(changesQuery);
   const { rows: snapshotCounts } = await pool.query(
@@ -237,13 +243,15 @@ app.get("/", async (req, res) => {
   );
   // Counts per window, independent of which tab is active, so every tab
   // label can show its own number at once (e.g. "24h (2)") rather than
-  // only revealing counts after you click into a window.
+  // only revealing counts after you click into a window. Matches the
+  // LOW-exclusion above so the displayed count always matches what's
+  // actually shown when that tab is clicked.
   const { rows: windowCounts } = await pool.query(`
     SELECT
-      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '24 hours') AS h24,
-      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '7 days') AS d7,
-      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '30 days') AS d30,
-      COUNT(*) AS all_time
+      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '24 hours' AND significance != 'LOW') AS h24,
+      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '7 days' AND significance != 'LOW') AS d7,
+      COUNT(*) FILTER (WHERE detected_at >= now() - INTERVAL '30 days' AND significance != 'LOW') AS d30,
+      COUNT(*) FILTER (WHERE significance != 'LOW') AS all_time
     FROM changes
   `);
   const counts = windowCounts[0];
@@ -282,6 +290,9 @@ app.get("/", async (req, res) => {
   <title>Competitor Watch</title>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@500;600&display=swap" />
   <style>
     :root {
       --paper: #F7F7F4;
@@ -312,8 +323,9 @@ app.get("/", async (req, res) => {
       margin-bottom: 28px;
     }
     h1 {
-      font-size: 20px;
-      font-weight: 650;
+      font-family: "IBM Plex Serif", Georgia, serif;
+      font-size: 22px;
+      font-weight: 600;
       letter-spacing: -0.01em;
       margin: 0 0 6px;
     }
@@ -690,7 +702,7 @@ app.get("/", async (req, res) => {
     <div class="signal-section-header">
       <div>
         <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
-        <p class="section-intro" style="margin-bottom:0; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out.</p>
+        <p class="section-intro" style="margin-bottom:0; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor.</p>
       </div>
       <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
     </div>
@@ -746,7 +758,7 @@ app.get("/", async (req, res) => {
         const notable = data.items.filter(item => item.significance === 'HIGH' || item.significance === 'MEDIUM');
 
         if (notable.length === 0) {
-          resultsEl.innerHTML = '<p class="signal-empty">Nothing notable in the last 30 days. Check "Full change history" below for the complete log, including routine updates.</p>';
+          resultsEl.innerHTML = '<p class="signal-empty">Nothing notable in the last 30 days.</p>';
         } else {
           const sigColors = { HIGH: '#C77D2E', MEDIUM: '#8A6A3D' };
           const sigLabels = { HIGH: 'High', MEDIUM: 'Medium' };
@@ -833,7 +845,7 @@ app.get("/", async (req, res) => {
   <div class="feed-header" style="margin-top:36px">
     <div class="section-title" style="margin-bottom:0">Full change history</div>
   </div>
-  <p class="section-intro" style="max-width:none">Every source change caught by a running background checker. Use the tabs to look at a certain time range.</p>
+  <p class="section-intro" style="max-width:none">Meaningful changes caught by a running background checker, in order — routine updates aren't shown. Use the tabs to look at a certain time range.</p>
 
   <div class="feed-header">
     <div class="window-tabs">
@@ -848,9 +860,9 @@ app.get("/", async (req, res) => {
     changes.length === 0
       ? `<div class="empty-state"><b>${
           activeWindow === "all"
-            ? "No changes recorded yet."
-            : `No changes in the last ${{ "24h": "24 hours", "7d": "7 days", "30d": "30 days" }[activeWindow]}.`
-        }</b><br>Baselines are being established for ${SOURCES.length} sources across ${companies.length} companies. Press "Check for updates" above to poll immediately instead of waiting for the next scheduled run.</div>`
+            ? "No meaningful changes recorded yet."
+            : `No meaningful changes in the last ${{ "24h": "24 hours", "7d": "7 days", "30d": "30 days" }[activeWindow]}.`
+        }</b><br>Routine updates are excluded from this view. Baselines are being established for ${SOURCES.length} sources across ${companies.length} companies — press "Check for updates" above to poll immediately instead of waiting for the next scheduled run.</div>`
       : changes
           .map((c) => {
             const sig = sigMeta[c.significance] || sigMeta.LOW;
