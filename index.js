@@ -58,6 +58,30 @@ app.post("/api/check-now", async (req, res) => {
   res.json({ ranAt: new Date().toISOString(), results });
 });
 
+// Wipes stored snapshots/changes so the next "Check for updates" treats
+// every source as brand-new and regenerates everything fresh — including
+// real AI summaries for rows that were originally created via the
+// rule-based fallback (e.g. before API credits were added, or from before
+// a significance-logic fix). Clears `changes` before `snapshots` since
+// `changes` has foreign keys into `snapshots` (see db.js schema) — clearing
+// in the other order would violate the constraint. This does NOT delete
+// the sources/config, only the accumulated history; a full "Check for
+// updates" pass afterward is required to repopulate anything, so this
+// endpoint alone leaves the dashboard temporarily empty.
+app.post("/api/reset-history", async (req, res) => {
+  try {
+    const changesResult = await pool.query(`DELETE FROM changes`);
+    const snapshotsResult = await pool.query(`DELETE FROM snapshots`);
+    res.json({
+      resetAt: new Date().toISOString(),
+      changesDeleted: changesResult.rowCount,
+      snapshotsDeleted: snapshotsResult.rowCount,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Live scan: reads every source's CURRENT content right now and asks Claude
 // to pull out anything the page itself dates within the requested window.
 // This is the fix for the gap where checkAllSources() only ever reports
@@ -330,7 +354,7 @@ app.get("/", async (req, res) => {
       margin: 0 0 6px;
     }
     .subhead {
-      font-size: 12.5px;
+      font-size: 16.5px;
       font-style: italic;
       font-weight: 400;
       color: var(--ink-faint);
@@ -379,6 +403,21 @@ app.get("/", async (req, res) => {
     .sources-details[open] { padding-bottom: 16px; border-bottom: 1px solid var(--rule); margin-bottom: 20px; }
     .chevron { font-size: 10px; transition: transform 0.15s ease; }
     .sources-details[open] .chevron { transform: rotate(180deg); }
+
+    .reset-history-btn {
+      margin-top: 16px;
+      background: none;
+      border: 1px solid #C77D2E;
+      color: #C77D2E;
+      font-family: var(--sans);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .reset-history-btn:hover { background: #FBF3EA; }
+    .reset-history-btn:disabled { opacity: 0.6; cursor: default; }
 
     .coverage {
       display: flex;
@@ -660,7 +699,27 @@ app.get("/", async (req, res) => {
       margin-bottom: 4px;
       padding-bottom: 6px;
       border-bottom: 1px solid var(--rule);
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
     }
+    .signal-company-heading::-webkit-details-marker { display: none; }
+    .signal-company-count {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--ink-faint);
+    }
+    .signal-company-heading .chevron {
+      margin-left: auto;
+      font-size: 10px;
+      color: var(--ink-faint);
+      transition: transform 0.15s ease;
+    }
+    .signal-company-group:not([open]) .chevron { transform: rotate(-90deg); }
     .origin-tag {
       font-family: var(--mono);
       font-size: 9.5px;
@@ -694,6 +753,8 @@ app.get("/", async (req, res) => {
             })
             .join("")}
         </div>
+        <button class="reset-history-btn" onclick="resetHistory()" id="resetBtn">Clear stored history &amp; regenerate with AI</button>
+        <p class="section-intro" style="margin-top:6px; max-width:none">Wipes all detected changes and snapshots, so the next "Check for updates" treats every source as new and regenerates real AI summaries — useful if old rows were saved before API credits were added.</p>
       </details>
     </div>
   </header>
@@ -732,6 +793,37 @@ app.get("/", async (req, res) => {
         .replace(/'/g, '&#39;');
     }
 
+    // Destructive — wipes stored history so old fallback-generated
+    // summaries (e.g. from before API credits were added) get replaced
+    // with real AI summaries on the next check, instead of sitting
+    // unchanged forever (a row only regenerates when ITS source page
+    // changes again, which could be a long wait for some sources).
+    // Requires explicit confirmation since this can't be undone.
+    async function resetHistory() {
+      if (!confirm('This clears ALL stored change history and snapshots. The dashboard will be empty until you run "Check for updates" again. Continue?')) {
+        return;
+      }
+      const btn = document.getElementById('resetBtn');
+      btn.disabled = true;
+      btn.textContent = 'Clearing…';
+      try {
+        const res = await fetch('/api/reset-history', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) {
+          alert('Reset failed: ' + data.error);
+          btn.disabled = false;
+          btn.textContent = 'Clear stored history & regenerate with AI';
+        } else {
+          alert('Cleared ' + data.changesDeleted + ' changes and ' + data.snapshotsDeleted + ' snapshots. Click "Check for updates" now to regenerate everything.');
+          location.reload();
+        }
+      } catch (err) {
+        alert('Reset failed: ' + err.message);
+        btn.disabled = false;
+        btn.textContent = 'Clear stored history & regenerate with AI';
+      }
+    }
+
     // Runs BOTH the poll-check (updates the stored change history) and the
     // live content scan, then renders one merged, significance-sorted
     // list. This replaced two separate buttons/results because the
@@ -745,8 +837,20 @@ app.get("/", async (req, res) => {
       const scanWindow = ['24h', '7d', '30d'].includes(windowParam) ? windowParam : '30d';
 
       btn.disabled = true;
-      btn.textContent = 'Checking ' + ${SOURCES.length} + ' sources…';
       document.getElementById('analysisResult').innerHTML = '';
+
+      // Show elapsed seconds while waiting, since the single "Checking…"
+      // label with no movement made the wait feel stuck even though work
+      // was progressing. This can't make the actual fetch faster — 38
+      // external sites at 6-at-a-time concurrency plus one Claude call
+      // has a real floor around 20-40s — but a moving counter gives an
+      // honest sense that it's working, not frozen.
+      const startTime = Date.now();
+      const tickInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        btn.textContent = 'Checking ' + ${SOURCES.length} + ' sources… (' + elapsed + 's)';
+      }, 1000);
+      btn.textContent = 'Checking ' + ${SOURCES.length} + ' sources…';
 
       try {
         const res = await fetch('/api/refresh-all?window=' + scanWindow);
@@ -796,7 +900,7 @@ app.get("/", async (req, res) => {
             const companyLabel = homepage
               ? '<a href="' + homepage + '" target="_blank" rel="noopener" class="coverage-company-link">' + company + '</a>'
               : company;
-            return '<div class="signal-company-group"><div class="signal-company-heading">' + companyLabel + '</div>' + items.map(renderRow).join('') + '</div>';
+            return '<details class="signal-company-group" open><summary class="signal-company-heading">' + companyLabel + ' <span class="signal-company-count">(' + items.length + ')</span><span class="chevron">▾</span></summary>' + items.map(renderRow).join('') + '</details>';
           }).join('');
 
           // Fetch the cross-competitor analysis AFTER the list is already
@@ -837,6 +941,7 @@ app.get("/", async (req, res) => {
         resultsEl.innerHTML = '<p class="signal-empty">Check failed: ' + err.message + '</p>';
       }
 
+      clearInterval(tickInterval);
       btn.disabled = false;
       btn.textContent = 'Check for updates';
     }
@@ -879,7 +984,7 @@ app.get("/", async (req, res) => {
         <div class="row-source"><span class="row-company">${companyLabel}</span><span class="row-channel">${channel}</span></div>
         <div class="row-summary"><a href="${escapeHtml(c.url)}" target="_blank" rel="noopener" class="row-summary-link">${escapeHtml(c.summary)}</a></div>
       </div>
-      <div class="row-time">${timeAgo(c.detected_at)}</div>
+      <div class="row-time" title="Time since this tool detected the change, not necessarily when it was published">${timeAgo(c.detected_at)}</div>
     </div>`;
           })
           .join("")
