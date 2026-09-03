@@ -451,7 +451,7 @@ function findBestMatchingUrl(summary, lines) {
   let bestScore = 0;
   let bestUrl = null;
   for (const { line, url } of lines) {
-    if (!url) continue;
+    if (!url || !isContentUrl(url)) continue;
     const lineWords = line.toLowerCase().replace(/[^\w\s]/g, "").split(/\s+/).filter((w) => w.length > 3);
     const overlap = lineWords.filter((w) => summaryWords.has(w)).length;
     if (overlap > bestScore) {
@@ -463,6 +463,21 @@ function findBestMatchingUrl(summary, lines) {
   // match — otherwise a weak/coincidental overlap could attach the wrong
   // article's URL to a summary, which is worse than no link at all.
   return bestScore >= 2 ? bestUrl : null;
+}
+
+// Excludes non-content link types (mailto:, tel:, javascript:, anchors,
+// unsubscribe/subscribe/login utility links) from URL matching. Real bug
+// this fixes: a "Contact support" or "Subscribe for updates" line can
+// share 2+ words with an AI-written summary (e.g. both mention
+// "maintenance" or "support"), and without this check that line's mailto:
+// link would win the word-overlap match — producing a row whose link goes
+// to an email address instead of the actual article/status page. This
+// isn't a word-overlap tuning problem; a mailto: link should never be a
+// candidate for "which article is this about" regardless of overlap score.
+function isContentUrl(url) {
+  if (/^mailto:|^tel:|^javascript:/i.test(url)) return false;
+  if (/\/(subscribe|unsubscribe|login|signin|signup)(\/|$|\?)/i.test(url)) return false;
+  return true;
 }
 
 // Debug: run extractRecentItems on already-known content and show the RAW
@@ -537,14 +552,15 @@ export async function synthesizeCompetitiveAnalysis(items) {
     })
     .join("\n");
 
-  const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform). Below is a list of recent significant updates from competitors, each tagged with its significance level.
+  const prompt = `You are a sharp competitive intelligence analyst for Railway (a cloud deployment platform). Below is a list of recent significant updates from competitors, each tagged with its significance level.
 
-Write a short analysis (3-5 sentences, plain prose, no headers or bullet points) that:
-- Identifies any real THEMES spanning multiple competitors (e.g. several companies pushing AI features, a pricing war, a shared technical direction)
-- Calls out which competitor(s) appear most aggressive or active right now, if the data supports that
-- Notes anything Railway specifically should pay attention to, if relevant
+Write a punchy, scannable analysis — NOT one long paragraph. Use this exact format:
+LEAD: <one sharp sentence naming the single most important theme or move right now>
+TAKEAWAY: <one short, specific observation — a competitor's pattern, a shared industry direction, etc.>
+TAKEAWAY: <another short, specific observation, only if there's a genuinely distinct second point>
+WATCH: <one sentence on what Railway specifically should pay attention to, only if something concrete stands out>
 
-Be honest if the list is too short or too disconnected to support a real thematic read — in that case just say so briefly rather than forcing a narrative. Do not simply restate the list of updates; that's already shown separately. Write only the analysis prose, no preamble.
+Rules: Each line is 1 sentence, plain and direct, no corporate hedging ("appears to," "may suggest"). Skip TAKEAWAY or WATCH lines entirely if you don't have a real, specific point — do not pad. If the list is too thin or scattered for a real read, output just: LEAD: Not enough signal yet to call a trend.
 
 --- RECENT UPDATES ---
 ${itemsText.slice(0, 6000)}`;
@@ -552,13 +568,32 @@ ${itemsText.slice(0, 6000)}`;
   try {
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 400,
+      max_tokens: 300,
       messages: [{ role: "user", content: prompt }],
     });
     const text = response.content.find((b) => b.type === "text")?.text || "";
-    return text.trim() || null;
+    return parseSynthesisResponse(text);
   } catch (err) {
     console.warn(`[summarize] Synthesis call failed: ${err.message}`);
     return null;
   }
+}
+
+// Parses the LEAD/TAKEAWAY/WATCH structured format into an array of
+// { type, text } lines the frontend can render as visually distinct
+// items, instead of one dense prose paragraph. Falls back to treating the
+// whole response as a single LEAD line if the model didn't follow the
+// format exactly, so a formatting slip doesn't lose the content entirely.
+function parseSynthesisResponse(text) {
+  const lines = [];
+  for (const rawLine of text.trim().split("\n")) {
+    const match = rawLine.match(/^(LEAD|TAKEAWAY|WATCH):\s*(.+)$/i);
+    if (match) {
+      lines.push({ type: match[1].toUpperCase(), text: match[2].trim() });
+    }
+  }
+  if (lines.length === 0 && text.trim()) {
+    lines.push({ type: "LEAD", text: text.trim() });
+  }
+  return lines.length > 0 ? lines : null;
 }

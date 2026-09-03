@@ -551,15 +551,22 @@ app.get("/", async (req, res) => {
     .signal-section-header {
       display: flex;
       justify-content: space-between;
-      align-items: center;
+      align-items: flex-start;
       gap: 16px;
-      flex-wrap: wrap;
       margin-bottom: 18px;
     }
+    .signal-section-header > div:first-child { flex: 1 1 auto; min-width: 0; }
+    .signal-section-header .refresh-btn { flex-shrink: 0; }
     .signal-empty {
       color: var(--ink-faint);
       font-size: 13px;
       padding: 8px 0;
+    }
+    .sig-legend-label {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--ink-soft);
+      margin: 0 0 6px;
     }
     .sig-legend {
       display: flex;
@@ -599,11 +606,38 @@ app.get("/", async (req, res) => {
       letter-spacing: 0.04em;
       margin-bottom: 6px;
     }
-    .analysis-text {
-      font-size: 14px;
+    .analysis-lead {
+      font-size: 15px;
+      font-weight: 650;
       color: var(--ink);
-      line-height: 1.6;
-      margin: 0;
+      line-height: 1.5;
+      margin: 0 0 8px;
+    }
+    .analysis-takeaway {
+      font-size: 13.5px;
+      color: var(--ink-soft);
+      line-height: 1.55;
+      margin: 0 0 6px;
+      padding-left: 14px;
+      position: relative;
+    }
+    .analysis-takeaway::before {
+      content: "—";
+      position: absolute;
+      left: 0;
+      color: var(--structure);
+    }
+    .analysis-watch {
+      font-size: 13.5px;
+      color: var(--ink);
+      line-height: 1.55;
+      margin: 10px 0 0;
+      padding-top: 8px;
+      border-top: 1px solid var(--rule);
+    }
+    .analysis-watch-label {
+      font-weight: 700;
+      color: var(--structure);
     }
     .signal-company-group { margin-bottom: 24px; }
     .signal-company-group:last-child { margin-bottom: 0; }
@@ -660,7 +694,9 @@ app.get("/", async (req, res) => {
       </div>
       <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
     </div>
-    <p class="sig-legend" style="margin-bottom:16px">Significance of each update: <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — pricing, breaking changes, or a major move</span>
+    <p class="sig-legend-label">Significance of each update:</p>
+    <p class="sig-legend" style="margin-bottom:16px">
+      <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — pricing, breaking changes, or a major move</span>
       <span class="sig-legend-item"><span class="sig-dot" style="background:#8A6A3D"></span>Medium — a real launch or update worth a glance</span>
     </p>
     <div id="analysisResult"></div>
@@ -767,9 +803,20 @@ app.get("/", async (req, res) => {
               body: JSON.stringify({ items: notable }),
             });
             const synthData = await synthRes.json();
-            analysisEl.innerHTML = synthData.analysis
-              ? '<div class="analysis-box"><div class="analysis-label">Analysis</div><p class="analysis-text">' + escapeHtml(synthData.analysis) + '</p></div>'
-              : '';
+            if (synthData.analysis && synthData.analysis.length > 0) {
+              const linesHtml = synthData.analysis.map(line => {
+                if (line.type === 'LEAD') {
+                  return '<p class="analysis-lead">' + escapeHtml(line.text) + '</p>';
+                } else if (line.type === 'WATCH') {
+                  return '<p class="analysis-watch"><span class="analysis-watch-label">Watch:</span> ' + escapeHtml(line.text) + '</p>';
+                } else {
+                  return '<p class="analysis-takeaway">' + escapeHtml(line.text) + '</p>';
+                }
+              }).join('');
+              analysisEl.innerHTML = '<div class="analysis-box"><div class="analysis-label">Analysis</div>' + linesHtml + '</div>';
+            } else {
+              analysisEl.innerHTML = '';
+            }
           } catch (err) {
             analysisEl.innerHTML = ''; // fail silently — the signal list above already rendered successfully
           }
