@@ -404,8 +404,12 @@ app.get("/", async (req, res) => {
     .chevron { font-size: 10px; transition: transform 0.15s ease; }
     .sources-details[open] .chevron { transform: rotate(180deg); }
 
+    .reset-history-wrap {
+      margin-top: 48px;
+      padding-top: 24px;
+      border-top: 1px solid var(--rule);
+    }
     .reset-history-btn {
-      margin-top: 16px;
       background: none;
       border: 1px solid #C77D2E;
       color: #C77D2E;
@@ -754,7 +758,6 @@ app.get("/", async (req, res) => {
             .join("")}
         </div>
       </details>
-      <button class="reset-history-btn" onclick="resetHistory()" id="resetBtn" title="Wipes all detected changes and snapshots so the next check regenerates everything fresh with real AI summaries — useful if old rows were saved before API credits were added.">Clear stored history &amp; regenerate with AI</button>
     </div>
   </header>
 
@@ -893,22 +896,12 @@ app.get("/", async (req, res) => {
             return maxB - maxA;
           });
 
-          resultsEl.innerHTML = companies.map(company => {
-            const items = byCompany[company].sort((a, b) => (sigRank[b.significance] || 0) - (sigRank[a.significance] || 0));
-            const homepage = COMPANY_HOMEPAGES[company];
-            const companyLabel = homepage
-              ? '<a href="' + homepage + '" target="_blank" rel="noopener" class="coverage-company-link">' + company + '</a>'
-              : company;
-            return '<details class="signal-company-group" open><summary class="signal-company-heading">' + companyLabel + ' <span class="signal-company-count">(' + items.length + ')</span><span class="chevron">▾</span></summary>' + items.map(renderRow).join('') + '</details>';
-          }).join('');
-
-          // Fetch the cross-competitor analysis AFTER the list is already
-          // showing, rather than blocking on it — the list is useful on
-          // its own, and analysis is an enhancement, not a prerequisite.
-          // Silently does nothing if no API key is configured (analysis
-          // comes back null) rather than showing an error, since "no AI
-          // analysis available" is an expected, non-broken state for
-          // anyone running this without credits.
+          // Fetch and show the cross-competitor analysis FIRST, before the
+          // company-by-company list — analysis is the higher-value
+          // synthesis and should be what a person sees immediately, with
+          // the detailed list as supporting detail below it. (Previously
+          // this ran after the list rendered, which visually put the more
+          // valuable content second.)
           const analysisEl = document.getElementById('analysisResult');
           analysisEl.innerHTML = '<p class="analysis-loading">Analyzing patterns across competitors…</p>';
           try {
@@ -933,8 +926,17 @@ app.get("/", async (req, res) => {
               analysisEl.innerHTML = '';
             }
           } catch (err) {
-            analysisEl.innerHTML = ''; // fail silently — the signal list above already rendered successfully
+            analysisEl.innerHTML = ''; // fail silently — the company list below still renders regardless
           }
+
+          resultsEl.innerHTML = companies.map(company => {
+            const items = byCompany[company].sort((a, b) => (sigRank[b.significance] || 0) - (sigRank[a.significance] || 0));
+            const homepage = COMPANY_HOMEPAGES[company];
+            const companyLabel = homepage
+              ? '<a href="' + homepage + '" target="_blank" rel="noopener" class="coverage-company-link">' + company + '</a>'
+              : company;
+            return '<details class="signal-company-group"><summary class="signal-company-heading">' + companyLabel + ' <span class="signal-company-count">(' + items.length + ')</span><span class="chevron">▾</span></summary>' + items.map(renderRow).join('') + '</details>';
+          }).join('');
         }
       } catch (err) {
         resultsEl.innerHTML = '<p class="signal-empty">Check failed: ' + err.message + '</p>';
@@ -949,7 +951,7 @@ app.get("/", async (req, res) => {
   <div class="feed-header" style="margin-top:36px">
     <div class="section-title" style="margin-bottom:0">Full signal history</div>
   </div>
-  <p class="section-intro" style="max-width:none">Meaningful changes caught over wider time horizons by a running background checker. Use the tabs to look at a certain time range. Times shown are when this tool detected each change, not necessarily when the company published it.</p>
+  <p class="section-intro" style="max-width:none">Meaningful changes caught over wider time horizons by a running background checker. Use the tabs to look at a certain time range.</p>
 
   <div class="feed-header">
     <div class="window-tabs">
@@ -966,7 +968,7 @@ app.get("/", async (req, res) => {
           activeWindow === "all"
             ? "No meaningful changes recorded yet."
             : `No meaningful changes in the last ${{ "24h": "24 hours", "7d": "7 days", "30d": "30 days" }[activeWindow]}.`
-        }</b><br>Routine updates are excluded from this view. Baselines are being established for ${SOURCES.length} sources across ${companies.length} companies — press "Check for updates" above to poll immediately instead of waiting for the next scheduled run.</div>`
+        }</b><br>Baselines are being established for ${SOURCES.length} sources across ${companies.length} companies. Press "Check for updates" above to poll immediately instead of waiting for the next scheduled run.</div>`
       : changes
           .map((c) => {
             const sig = sigMeta[c.significance] || sigMeta.LOW;
@@ -987,6 +989,12 @@ app.get("/", async (req, res) => {
     </div>`;
           })
           .join("")
+  }
+
+  ${
+    changes.length > 0
+      ? `<div class="reset-history-wrap"><button class="reset-history-btn" onclick="resetHistory()" id="resetBtn" title="Wipes all detected changes and snapshots so the next check regenerates everything fresh with real AI summaries — useful if old rows were saved before API credits were added.">Clear stored history &amp; regenerate with AI</button></div>`
+      : ""
   }
 </body>
 </html>`);
