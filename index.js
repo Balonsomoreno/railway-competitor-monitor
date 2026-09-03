@@ -9,6 +9,26 @@ import { SOURCES, CANDIDATE_SOURCES, COMPANY_HOMEPAGES } from "./sources.js";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Escapes HTML-significant characters so scraped page text can never be
+// interpreted as real markup once inserted into the page. Real bug this
+// fixes: excerpt text is untrusted (scraped from competitor pages) and was
+// being concatenated directly into HTML strings. When a scraped excerpt
+// happened to contain literal tag-like text (a raw <img alt="..."> from
+// unrendered page source, or <div class="..."> frontmatter), the browser
+// parsed it as a real element instead of displaying it as visible text —
+// an actual <img> would then load/fail and distort that row's height,
+// throwing off alignment for rows below it. Every render path that
+// inserts summary/excerpt text (server-side EJS-style templates AND the
+// client-side runRefresh() script) needs this applied.
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 await initSchema();
 
 // --- API ---
@@ -281,17 +301,19 @@ app.get("/", async (req, res) => {
       font-size: 20px;
       font-weight: 650;
       letter-spacing: -0.01em;
-      margin: 0 0 4px;
-    }
-    .subhead {
-      font-size: 15px;
-      font-weight: 400;
-      color: var(--ink);
       margin: 0 0 6px;
     }
+    .subhead {
+      font-size: 12.5px;
+      font-style: italic;
+      font-weight: 400;
+      color: var(--ink-faint);
+      margin: 0 0 10px;
+    }
     .tagline {
-      font-size: 13px;
+      font-size: 14px;
       color: var(--ink-soft);
+      line-height: 1.6;
       margin: 0 0 14px;
     }
     .refresh-btn {
@@ -505,20 +527,22 @@ app.get("/", async (req, res) => {
       .row-time { grid-column: 2; padding-top: 0; }
     }
 
+    .page-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .page-actions-note {
+      font-size: 12px;
+      color: var(--ink-faint);
+    }
     .signal-section {
       background: var(--paper-raised);
       border: 1px solid var(--rule);
       border-radius: 10px;
       padding: 20px 22px;
       margin-bottom: 36px;
-    }
-    .signal-section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
-      flex-wrap: wrap;
-      margin-bottom: 18px;
     }
     .signal-empty {
       color: var(--ink-faint);
@@ -588,23 +612,37 @@ app.get("/", async (req, res) => {
     </div>
   </header>
 
+  <div class="page-actions">
+    <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check all sources for updates</button>
+    <span class="page-actions-note">Refreshes both sections below (~1–2 min)</span>
+  </div>
+
   <div class="signal-section">
-    <div class="signal-section-header">
-      <div>
-        <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
-        <p class="section-intro" style="margin-bottom:0; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out.</p>
-      </div>
-      <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
-    </div>
+    <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
+    <p class="section-intro" style="margin-bottom:0; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out.</p>
     <p class="sig-legend" style="margin-bottom:16px">
       <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — pricing, breaking changes, or a major move</span>
       <span class="sig-legend-item"><span class="sig-dot" style="background:#8A6A3D"></span>Medium — a real launch or update worth a glance</span>
     </p>
-    <div id="signalResults"><p class="signal-empty">Press "Check for updates" to pull the latest.</p></div>
+    <div id="signalResults"><p class="signal-empty">Press "Check all sources for updates" above to pull the latest.</p></div>
   </div>
 
   <script>
     const COMPANY_HOMEPAGES = ${JSON.stringify(COMPANY_HOMEPAGES)};
+
+    // Same fix as the server-side escapeHtml() in index.js: scraped
+    // excerpt text is untrusted and was being inserted via innerHTML
+    // without escaping. A literal <img alt="..."> or <div class="...">
+    // present in a page's raw source text would get parsed as a real
+    // element instead of shown as text, distorting row height/alignment.
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
 
     // Runs BOTH the poll-check (updates the stored change history) and the
     // live content scan, then renders one merged, significance-sorted
@@ -643,7 +681,7 @@ app.get("/", async (req, res) => {
             const color = sigColors[item.significance] || sigColors.MEDIUM;
             const label = sigLabels[item.significance] || 'Medium';
             const sigClass = item.significance === 'HIGH' ? ' sig-high' : ' sig-medium';
-            return '<div class="row' + sigClass + '"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + item.url + '" target="_blank" rel="noopener" class="row-summary-link">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
+            return '<div class="row' + sigClass + '"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + escapeHtml(item.url) + '" target="_blank" rel="noopener" class="row-summary-link">' + escapeHtml(item.summary) + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
           };
 
           // Group by company so the signal reads as "here's what each
@@ -716,7 +754,7 @@ app.get("/", async (req, res) => {
       <div class="row-sig" style="color:${sig.color}">${sig.label}</div>
       <div class="row-body">
         <div class="row-source"><span class="row-company">${companyLabel}</span><span class="row-channel">${channel}</span></div>
-        <div class="row-summary"><a href="${c.url}" target="_blank" rel="noopener" class="row-summary-link">${c.summary}</a></div>
+        <div class="row-summary"><a href="${escapeHtml(c.url)}" target="_blank" rel="noopener" class="row-summary-link">${escapeHtml(c.summary)}</a></div>
       </div>
       <div class="row-time">${timeAgo(c.detected_at)}</div>
     </div>`;
