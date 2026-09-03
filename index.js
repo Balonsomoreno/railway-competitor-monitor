@@ -753,9 +753,8 @@ app.get("/", async (req, res) => {
             })
             .join("")}
         </div>
-        <button class="reset-history-btn" onclick="resetHistory()" id="resetBtn">Clear stored history &amp; regenerate with AI</button>
-        <p class="section-intro" style="margin-top:6px; max-width:none">Wipes all detected changes and snapshots, so the next "Check for updates" treats every source as new and regenerates real AI summaries — useful if old rows were saved before API credits were added.</p>
       </details>
+      <button class="reset-history-btn" onclick="resetHistory()" id="resetBtn" title="Wipes all detected changes and snapshots so the next check regenerates everything fresh with real AI summaries — useful if old rows were saved before API credits were added.">Clear stored history &amp; regenerate with AI</button>
     </div>
   </header>
 
@@ -858,7 +857,7 @@ app.get("/", async (req, res) => {
         // Only HIGH/MEDIUM surface here — this section is meant to be a
         // short, meaningful list, not everything that technically
         // changed. LOW-significance items (routine status updates, minor
-        // copy tweaks) still exist in "Full change history" below.
+        // copy tweaks) still exist in "Full signal history" below.
         const notable = data.items.filter(item => item.significance === 'HIGH' || item.significance === 'MEDIUM');
 
         if (notable.length === 0) {
@@ -948,9 +947,9 @@ app.get("/", async (req, res) => {
   </script>
 
   <div class="feed-header" style="margin-top:36px">
-    <div class="section-title" style="margin-bottom:0">Full change history</div>
+    <div class="section-title" style="margin-bottom:0">Full signal history</div>
   </div>
-  <p class="section-intro" style="max-width:none">Meaningful changes caught by a running background checker, in order — routine updates aren't shown. Use the tabs to look at a certain time range.</p>
+  <p class="section-intro" style="max-width:none">Meaningful changes caught over wider time horizons by a running background checker. Use the tabs to look at a certain time range. Times shown are when this tool detected each change, not necessarily when the company published it.</p>
 
   <div class="feed-header">
     <div class="window-tabs">
@@ -984,7 +983,7 @@ app.get("/", async (req, res) => {
         <div class="row-source"><span class="row-company">${companyLabel}</span><span class="row-channel">${channel}</span></div>
         <div class="row-summary"><a href="${escapeHtml(c.url)}" target="_blank" rel="noopener" class="row-summary-link">${escapeHtml(c.summary)}</a></div>
       </div>
-      <div class="row-time" title="Time since this tool detected the change, not necessarily when it was published">${timeAgo(c.detected_at)}</div>
+      <div class="row-time">${timeAgo(c.detected_at)}</div>
     </div>`;
           })
           .join("")

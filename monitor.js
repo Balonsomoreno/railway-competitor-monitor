@@ -184,17 +184,42 @@ export async function checkSource(source) {
   return { source: source.name, status: "change_detected", summary, significance };
 }
 
-export async function checkAllSources() {
-  const results = [];
-  for (const source of SOURCES) {
-    try {
-      const result = await checkSource(source);
-      results.push(result);
-    } catch (err) {
-      results.push({ source: source.name, status: "error", error: err.message });
+// Runs an array of async jobs with at most `limit` running concurrently.
+// Used to parallelize the 38-source checks instead of running them one at
+// a time — the original sequential version was the real cause of "Check
+// for updates" feeling slow (38 sequential fetches, then another 38 for
+// the scan path, all one-at-a-time). A modest concurrency cap (not
+// unlimited) avoids hammering any single target site or overwhelming
+// Railway's outbound connections all at once.
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function runNext() {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      results[i] = await worker(items[i], i);
     }
   }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, runNext);
+  await Promise.all(workers);
   return results;
+}
+
+export async function checkAllSources() {
+  // Concurrency of 10 (up from 6): each worker here does a page fetch AND,
+  // if the page changed, one Claude call for summarization. 6 was tuned
+  // for "don't hammer 38 different external sites too hard," but became
+  // the bottleneck once real AI summarization was added on top — more
+  // parallel workers means more Claude calls in flight at once, cutting
+  // the number of sequential "rounds" needed to get through all 38
+  // sources. Still capped, not unlimited, to avoid rate-limit issues.
+  return runWithConcurrency(SOURCES, 10, async (source) => {
+    try {
+      return await checkSource(source);
+    } catch (err) {
+      return { source: source.name, status: "error", error: err.message };
+    }
+  });
 }
 
 // Scans every source's CURRENT content for items the page itself dates
@@ -209,20 +234,18 @@ export async function checkAllSources() {
 // scan for display purposes, so it can't corrupt the change-detection
 // history, and can safely be run as often as wanted without side effects.
 export async function scanRecentAcrossSources(windowDays) {
-  const results = [];
-  for (const source of SOURCES) {
+  // Same concurrency bump as checkAllSources() above, same reasoning:
+  // this path always makes a Claude call per source (not conditionally,
+  // like the diff path), so it's the more Claude-call-heavy of the two —
+  // raising concurrency here matters at least as much.
+  return runWithConcurrency(SOURCES, 10, async (source) => {
     try {
       const html = await fetchSource(source);
       const linkedLines = extractTextWithLinks(html, source.selector, source.url);
       const items = await extractRecentItems({ sourceName: source.name, lines: linkedLines, windowDays });
-      results.push({
-        source: source.name,
-        url: source.url,
-        items,
-      });
+      return { source: source.name, url: source.url, items };
     } catch (err) {
-      results.push({ source: source.name, url: source.url, items: [], error: err.message });
+      return { source: source.name, url: source.url, items: [], error: err.message };
     }
-  }
-  return results;
+  });
 }
