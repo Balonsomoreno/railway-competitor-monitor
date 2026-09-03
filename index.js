@@ -3,11 +3,12 @@ import express from "express";
 import cron from "node-cron";
 import { pool, initSchema } from "./db.js";
 import { checkAllSources, scanRecentAcrossSources, fetchSource, extractText, extractTextWithLinks } from "./monitor.js";
-import { debugExtractRecentItems } from "./summarize.js";
+import { debugExtractRecentItems, synthesizeCompetitiveAnalysis } from "./summarize.js";
 import { SOURCES, CANDIDATE_SOURCES, COMPANY_HOMEPAGES } from "./sources.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.use(express.json());
 
 // Escapes HTML-significant characters so scraped page text can never be
 // interpreted as real markup once inserted into the page. Real bug this
@@ -119,6 +120,19 @@ app.get("/api/refresh-all", async (req, res) => {
   merged.sort((a, b) => (sigRank[b.significance] || 0) - (sigRank[a.significance] || 0));
 
   res.json({ refreshedAt: new Date().toISOString(), windowDays, items: merged });
+});
+
+// Takes items the client already has (from /api/refresh-all) and asks
+// Claude for real cross-competitor analysis — themes, who's most active,
+// what's worth Railway's attention. Deliberately separate from
+// /api/refresh-all so the (cheap, fast) fetch-and-filter step and the
+// (one extra Claude call, only meaningful with real signal items) synthesis
+// step can be sequenced client-side: show the list first, then layer in
+// analysis, rather than blocking the whole page on one slow combined call.
+app.post("/api/synthesize", async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  const analysis = await synthesizeCompetitiveAnalysis(items);
+  res.json({ analysis }); // analysis is null if no key configured, no items, or the call failed — caller shows nothing in that case
 });
 
 // Debug: show exactly what one source's extraction pipeline actually sees,
@@ -527,22 +541,20 @@ app.get("/", async (req, res) => {
       .row-time { grid-column: 2; padding-top: 0; }
     }
 
-    .page-actions {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 24px;
-    }
-    .page-actions-note {
-      font-size: 12px;
-      color: var(--ink-faint);
-    }
     .signal-section {
       background: var(--paper-raised);
       border: 1px solid var(--rule);
       border-radius: 10px;
       padding: 20px 22px;
       margin-bottom: 36px;
+    }
+    .signal-section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
     }
     .signal-empty {
       color: var(--ink-faint);
@@ -564,6 +576,34 @@ app.get("/", async (req, res) => {
       height: 7px;
       border-radius: 50%;
       flex-shrink: 0;
+    }
+    .analysis-loading {
+      font-size: 12.5px;
+      color: var(--ink-faint);
+      font-style: italic;
+      margin-bottom: 16px;
+    }
+    .analysis-box {
+      background: var(--structure-soft);
+      border-left: 3px solid var(--structure);
+      border-radius: 6px;
+      padding: 14px 16px;
+      margin-bottom: 20px;
+    }
+    .analysis-label {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--structure);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 6px;
+    }
+    .analysis-text {
+      font-size: 14px;
+      color: var(--ink);
+      line-height: 1.6;
+      margin: 0;
     }
     .signal-company-group { margin-bottom: 24px; }
     .signal-company-group:last-child { margin-bottom: 0; }
@@ -612,19 +652,19 @@ app.get("/", async (req, res) => {
     </div>
   </header>
 
-  <div class="page-actions">
-    <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check all sources for updates</button>
-    <span class="page-actions-note">Refreshes both sections below (~1–2 min)</span>
-  </div>
-
   <div class="signal-section">
-    <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
-    <p class="section-intro" style="margin-bottom:0; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out.</p>
-    <p class="sig-legend" style="margin-bottom:16px">
-      <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — pricing, breaking changes, or a major move</span>
+    <div class="signal-section-header">
+      <div>
+        <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
+        <p class="section-intro" style="margin-bottom:0; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out.</p>
+      </div>
+      <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
+    </div>
+    <p class="sig-legend" style="margin-bottom:16px">Significance of each update: <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — pricing, breaking changes, or a major move</span>
       <span class="sig-legend-item"><span class="sig-dot" style="background:#8A6A3D"></span>Medium — a real launch or update worth a glance</span>
     </p>
-    <div id="signalResults"><p class="signal-empty">Press "Check all sources for updates" above to pull the latest.</p></div>
+    <div id="analysisResult"></div>
+    <div id="signalResults"><p class="signal-empty">Press "Check for updates" to pull the latest.</p></div>
   </div>
 
   <script>
@@ -658,6 +698,7 @@ app.get("/", async (req, res) => {
 
       btn.disabled = true;
       btn.textContent = 'Checking ' + ${SOURCES.length} + ' sources…';
+      document.getElementById('analysisResult').innerHTML = '';
 
       try {
         const res = await fetch('/api/refresh-all?window=' + scanWindow);
@@ -709,6 +750,29 @@ app.get("/", async (req, res) => {
               : company;
             return '<div class="signal-company-group"><div class="signal-company-heading">' + companyLabel + '</div>' + items.map(renderRow).join('') + '</div>';
           }).join('');
+
+          // Fetch the cross-competitor analysis AFTER the list is already
+          // showing, rather than blocking on it — the list is useful on
+          // its own, and analysis is an enhancement, not a prerequisite.
+          // Silently does nothing if no API key is configured (analysis
+          // comes back null) rather than showing an error, since "no AI
+          // analysis available" is an expected, non-broken state for
+          // anyone running this without credits.
+          const analysisEl = document.getElementById('analysisResult');
+          analysisEl.innerHTML = '<p class="analysis-loading">Analyzing patterns across competitors…</p>';
+          try {
+            const synthRes = await fetch('/api/synthesize', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ items: notable }),
+            });
+            const synthData = await synthRes.json();
+            analysisEl.innerHTML = synthData.analysis
+              ? '<div class="analysis-box"><div class="analysis-label">Analysis</div><p class="analysis-text">' + escapeHtml(synthData.analysis) + '</p></div>'
+              : '';
+          } catch (err) {
+            analysisEl.innerHTML = ''; // fail silently — the signal list above already rendered successfully
+          }
         }
       } catch (err) {
         resultsEl.innerHTML = '<p class="signal-empty">Check failed: ' + err.message + '</p>';

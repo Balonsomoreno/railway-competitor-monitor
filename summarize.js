@@ -515,3 +515,50 @@ ${contentForPrompt.slice(0, 6000)}`;
     };
   }
 }
+
+// Genuine cross-competitor synthesis: takes the already-filtered
+// HIGH/MEDIUM signal items (one per company's specific update) and asks
+// Claude to write actual analysis — not a re-list of the same items, but
+// real interpretation: what themes span multiple companies, who's making
+// the most aggressive moves, what a competitive strategist should
+// actually take away. This is new output that the rule-based fallback
+// structurally cannot produce (it can filter and rank by heuristic, but
+// it cannot synthesize meaning across items the way an LLM reading full
+// context can). Requires a working API key — has no rule-based fallback,
+// since a fabricated "analysis" would be worse than none at all; if the
+// call fails, the caller should show nothing rather than a fake synthesis.
+export async function synthesizeCompetitiveAnalysis(items) {
+  if (!hasApiKey || items.length === 0) return null;
+
+  const itemsText = items
+    .map((item) => {
+      const company = item.source.split(" ")[0];
+      return `[${item.significance}] ${company} (${item.dateLabel}): ${item.summary}`;
+    })
+    .join("\n");
+
+  const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform). Below is a list of recent significant updates from competitors, each tagged with its significance level.
+
+Write a short analysis (3-5 sentences, plain prose, no headers or bullet points) that:
+- Identifies any real THEMES spanning multiple competitors (e.g. several companies pushing AI features, a pricing war, a shared technical direction)
+- Calls out which competitor(s) appear most aggressive or active right now, if the data supports that
+- Notes anything Railway specifically should pay attention to, if relevant
+
+Be honest if the list is too short or too disconnected to support a real thematic read — in that case just say so briefly rather than forcing a narrative. Do not simply restate the list of updates; that's already shown separately. Write only the analysis prose, no preamble.
+
+--- RECENT UPDATES ---
+${itemsText.slice(0, 6000)}`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 400,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const text = response.content.find((b) => b.type === "text")?.text || "";
+    return text.trim() || null;
+  } catch (err) {
+    console.warn(`[summarize] Synthesis call failed: ${err.message}`);
+    return null;
+  }
+}
