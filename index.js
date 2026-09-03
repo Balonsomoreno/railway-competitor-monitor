@@ -273,9 +273,6 @@ app.get("/", async (req, res) => {
       line-height: 1.5;
     }
     header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
       border-bottom: 1px solid var(--rule);
       padding-bottom: 20px;
       margin-bottom: 28px;
@@ -288,14 +285,14 @@ app.get("/", async (req, res) => {
     }
     .subhead {
       font-size: 15px;
-      font-weight: 600;
+      font-weight: 400;
       color: var(--ink);
       margin: 0 0 6px;
     }
     .tagline {
       font-size: 13px;
       color: var(--ink-soft);
-      margin: 0;
+      margin: 0 0 14px;
     }
     .refresh-btn {
       background: var(--ink);
@@ -314,23 +311,24 @@ app.get("/", async (req, res) => {
     .refresh-btn:hover { background: #333; }
 
     .sources-details {
-      margin-bottom: 32px;
-      border-bottom: 1px solid var(--rule);
-      padding-bottom: 20px;
+      margin-bottom: 0;
+      padding-bottom: 0;
+      border-bottom: none;
     }
     .sources-details summary {
       cursor: pointer;
-      font-size: 13px;
+      font-size: 12.5px;
       font-weight: 600;
-      color: var(--ink-soft);
+      color: var(--structure);
       list-style: none;
-      display: flex;
+      display: inline-flex;
       align-items: center;
       gap: 6px;
       user-select: none;
     }
     .sources-details summary::-webkit-details-marker { display: none; }
     .sources-details summary:hover { color: var(--ink); }
+    .sources-details[open] { padding-bottom: 16px; border-bottom: 1px solid var(--rule); margin-bottom: 20px; }
     .chevron { font-size: 10px; transition: transform 0.15s ease; }
     .sources-details[open] .chevron { transform: rotate(180deg); }
 
@@ -433,8 +431,8 @@ app.get("/", async (req, res) => {
       grid-template-columns: 88px 1fr auto;
       gap: 16px;
       align-items: baseline;
-      padding: 14px 16px;
-      margin: 0 -16px;
+      padding: 14px 22px;
+      margin: 0 -24px;
       border-bottom: 1px solid var(--rule);
       border-left: 3px solid transparent;
       border-radius: 4px;
@@ -442,6 +440,11 @@ app.get("/", async (req, res) => {
     .row:last-child { border-bottom: none; }
     .row.sig-high { border-left-color: #C77D2E; background: #FBF3EA; }
     .row.sig-medium { border-left-color: #8A6A3D; background: #F8F5EF; }
+    /* Inside .signal-section (padding: 20px 22px), the body's -24px
+       margin overshoots by 2px on each side — correct it in this
+       specific context so the colored background bleeds exactly to the
+       card's edge, not past it. */
+    .signal-section .row { margin: 0 -22px; }
 
     .row-sig {
       font-family: var(--mono);
@@ -512,11 +515,11 @@ app.get("/", async (req, res) => {
     .signal-section-header {
       display: flex;
       justify-content: space-between;
-      align-items: flex-start;
+      align-items: center;
       gap: 16px;
       flex-wrap: wrap;
+      margin-bottom: 18px;
     }
-    .signal-section .row { padding: 12px 0; }
     .signal-empty {
       color: var(--ink-faint);
       font-size: 13px;
@@ -562,6 +565,26 @@ app.get("/", async (req, res) => {
       <h1>Competitor Watch</h1>
       <p class="subhead">Built to answer "what have our competitors done recently?"</p>
       <p class="tagline">Checks changelogs, blogs, docs, status pages, pricing, and job listings across eight competitive developer platforms, surfacing competitive moves for ongoing intelligence.</p>
+      <details class="sources-details">
+        <summary>Tracking ${companies.length} competitors across ${SOURCES.length} sources <span class="chevron">▾</span></summary>
+        <p class="section-intro" style="margin-top:12px; max-width:none"><em>Source counts differ because not every company publishes a public changelog, CLI, or careers page we can track.</em></p>
+        <div class="coverage">
+          ${companies
+            .map((company) => {
+              const companySources = SOURCES.filter((s) => companyOf(s.name) === company);
+              const checked = companySources.filter((s) =>
+                snapshotCounts.some((c) => c.source_name === s.name)
+              ).length;
+              const channelList = companySources.map((s) => channelOf(s.name, company)).join(" · ");
+              const homepage = COMPANY_HOMEPAGES[company];
+              const companyLabel = homepage
+                ? `<a href="${homepage}" target="_blank" rel="noopener" class="coverage-company-link">${company}</a>`
+                : company;
+              return `<div class="coverage-item"><div class="coverage-item-head"><b>${companyLabel}</b><span>${checked}/${companySources.length} sources</span></div><div class="coverage-item-channels">${channelList}</div></div>`;
+            })
+            .join("")}
+        </div>
+      </details>
     </div>
   </header>
 
@@ -569,7 +592,7 @@ app.get("/", async (req, res) => {
     <div class="signal-section-header">
       <div>
         <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
-        <p class="section-intro" style="margin-bottom:8px; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out.</p>
+        <p class="section-intro" style="margin-bottom:0; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out.</p>
       </div>
       <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
     </div>
@@ -579,27 +602,6 @@ app.get("/", async (req, res) => {
     </p>
     <div id="signalResults"><p class="signal-empty">Press "Check for updates" to pull the latest.</p></div>
   </div>
-
-  <details class="sources-details">
-    <summary>Tracking ${companies.length} competitors across ${SOURCES.length} sources <span class="chevron">▾</span></summary>
-    <p class="section-intro" style="margin-top:12px; max-width:none"><em>Source counts differ because not every company publishes a public changelog, CLI, or careers page we can track.</em></p>
-    <div class="coverage">
-      ${companies
-        .map((company) => {
-          const companySources = SOURCES.filter((s) => companyOf(s.name) === company);
-          const checked = companySources.filter((s) =>
-            snapshotCounts.some((c) => c.source_name === s.name)
-          ).length;
-          const channelList = companySources.map((s) => channelOf(s.name, company)).join(" · ");
-          const homepage = COMPANY_HOMEPAGES[company];
-          const companyLabel = homepage
-            ? `<a href="${homepage}" target="_blank" rel="noopener" class="coverage-company-link">${company}</a>`
-            : company;
-          return `<div class="coverage-item"><div class="coverage-item-head"><b>${companyLabel}</b><span>${checked}/${companySources.length} sources</span></div><div class="coverage-item-channels">${channelList}</div></div>`;
-        })
-        .join("")}
-    </div>
-  </details>
 
   <script>
     const COMPANY_HOMEPAGES = ${JSON.stringify(COMPANY_HOMEPAGES)};

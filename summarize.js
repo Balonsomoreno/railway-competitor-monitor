@@ -136,7 +136,29 @@ function looksLikeNavChrome(text) {
 
 function isRoutineNoise(text) {
   const trimmed = text.trim();
-  return ROUTINE_NOISE_PATTERNS.some((pattern) => pattern.test(trimmed)) || looksLikeNavChrome(trimmed);
+  return (
+    ROUTINE_NOISE_PATTERNS.some((pattern) => pattern.test(trimmed)) ||
+    looksLikeNavChrome(trimmed) ||
+    looksLikeRawSourceArtifact(trimmed)
+  );
+}
+
+// Some pages' scraped content includes raw build artifacts instead of
+// rendered prose — e.g. Fly.io's docs pages exposed literal YAML
+// frontmatter and unrendered HTML/Markdown source ("---\ntitle: ...\n
+// layout: docs\n---\n<div class=\"grid grid-cols-2...\">\n## Ready to get
+// started?") as part of the page's own text content, not as an artifact
+// of our extraction. This reads as broken/indented text in the UI even
+// though the row structure itself is fine — it's a content-quality
+// problem, not a layout bug. Detected by looking for markers that
+// essentially never appear in real prose: YAML frontmatter delimiters,
+// raw HTML tag syntax, or Markdown code fences.
+function looksLikeRawSourceArtifact(text) {
+  if (/^---\s*$/m.test(text)) return true; // YAML frontmatter delimiter on its own line
+  if (/^[a-z_]+:\s*(true|false|docs|\S+)\s*$/im.test(text) && /---/.test(text)) return true; // "key: value" frontmatter lines alongside a --- delimiter
+  if (/<div class="[\w-]+[\w\s-]*">/i.test(text)) return true; // literal unrendered HTML tag with a class attribute
+  if (/```\w*/.test(text)) return true; // Markdown code fence
+  return false;
 }
 
 // Rough "what's new" extraction using a real contiguous-block diff instead
