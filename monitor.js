@@ -53,6 +53,64 @@ export function extractText(html, selector) {
     .trim();
 }
 
+// Same extraction as extractText, but returns { line, url } pairs instead
+// of flat text — the url is the href of the first <a> found inside that
+// block element, resolved to an absolute URL, or null if the block has no
+// link. This exists specifically so downstream code (extractRecentItems in
+// summarize.js) can link each dated item to its OWN article/entry URL
+// instead of only ever having the page's root URL available. Before this,
+// every row in "Latest competitive signals" and "Full change history"
+// linked to e.g. blog.cloudflare.com regardless of which specific post the
+// row was actually about, because plain extractText() throws away href
+// information entirely — this fixes that at the source rather than trying
+// to reconstruct URLs after the fact from already-flattened text.
+export function extractTextWithLinks(html, selector, baseUrl) {
+  const $ = cheerio.load(html);
+  const selectors = selector.split(",").map((s) => s.trim());
+  let node = null;
+  for (const sel of selectors) {
+    if ($(sel).length) {
+      node = $(sel).first();
+      break;
+    }
+  }
+  const target = node || $("body");
+  target.find("script, style, noscript, nav, footer").remove();
+
+  const lines = [];
+  target.find(BLOCK_TAGS).each((_, el) => {
+    const $el = $(el);
+    const text = $el
+      .clone()
+      .children(BLOCK_TAGS.split(",").join(","))
+      .remove()
+      .end()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) return;
+
+    // Prefer a link ON this element itself, then the nearest link inside
+    // it, then a link on an ancestor (common pattern: the whole card is
+    // wrapped in <a>, with the date/title as inner text).
+    let href = $el.is("a") ? $el.attr("href") : $el.find("a[href]").first().attr("href");
+    if (!href) href = $el.closest("a[href]").attr("href");
+
+    let url = null;
+    if (href) {
+      try {
+        url = new URL(href, baseUrl).toString();
+      } catch {
+        url = null; // malformed href (e.g. "javascript:void(0)") — leave null rather than guess
+      }
+    }
+
+    lines.push({ line: text, url });
+  });
+
+  return lines;
+}
+
 export async function fetchSource(source) {
   const res = await fetch(source.url, {
     headers: {
@@ -155,8 +213,8 @@ export async function scanRecentAcrossSources(windowDays) {
   for (const source of SOURCES) {
     try {
       const html = await fetchSource(source);
-      const text = extractText(html, source.selector);
-      const items = await extractRecentItems({ sourceName: source.name, content: text, windowDays });
+      const linkedLines = extractTextWithLinks(html, source.selector, source.url);
+      const items = await extractRecentItems({ sourceName: source.name, lines: linkedLines, windowDays });
       results.push({
         source: source.name,
         url: source.url,

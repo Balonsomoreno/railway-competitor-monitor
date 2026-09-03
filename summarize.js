@@ -232,23 +232,19 @@ const MONTH_INDEX = {
   jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
 };
 
-function ruleBasedExtractRecentItems(content, windowDays) {
+function ruleBasedExtractRecentItems(lines, windowDays) {
   const now = new Date();
   const cutoff = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
   const items = [];
 
-  // Now that extractText() preserves element boundaries as newlines,
-  // operate line-by-line instead of slicing raw character offsets across
-  // the whole blob. This is the actual fix for excerpts that used to
-  // mash unrelated page elements together (e.g. a name from one card
-  // running into the next card's text) — each line here corresponds to
-  // one real block-level element on the page, so an excerpt drawn from a
-  // date's own line (or the very next line) can't cross into unrelated
-  // content the way raw character-slicing could.
-  const lines = content.split("\n");
-
+  // `lines` is now an array of { line, url } objects (from
+  // extractTextWithLinks), one per real block-level element on the page —
+  // this is what makes per-item URLs possible at all. Previously this
+  // operated on a flat text blob, which meant every item fell back to the
+  // page's root URL (e.g. blog.cloudflare.com) instead of the specific
+  // article/entry it was actually about.
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    const { line, url: lineUrl } = lines[i];
     DATE_RE.lastIndex = 0;
     const match = DATE_RE.exec(line);
     if (!match) continue;
@@ -264,11 +260,16 @@ function ruleBasedExtractRecentItems(content, windowDays) {
     // same line, depending on the site's markup (e.g. "No incidents
     // reported. Sep 1, 2026" vs. "Sep 1, 2026 — New feature launched").
     // Try same-line-before first (usually the more complete phrase when
-    // present), then same-line-after, then fall back to the next line.
+    // present), then same-line-after, then fall back to the next line —
+    // and if we fall back to the next line, prefer ITS url if the current
+    // line had none (the headline and its link often live one element
+    // apart, e.g. a date div followed by a linked title).
     const beforeDate = line.slice(0, match.index).trim();
     const afterDate = line.slice(match.index + full.length).trim();
+    const nextLineObj = lines[i + 1];
     const excerpt =
-      beforeDate.length > 3 ? beforeDate : afterDate.length > 3 ? afterDate : (lines[i + 1] || "").trim();
+      beforeDate.length > 3 ? beforeDate : afterDate.length > 3 ? afterDate : (nextLineObj?.line || "").trim();
+    const itemUrl = lineUrl || nextLineObj?.url || null;
 
     if (!excerpt || isRoutineNoise(excerpt)) continue;
 
@@ -276,6 +277,7 @@ function ruleBasedExtractRecentItems(content, windowDays) {
       dateLabel: full,
       summary: excerpt.slice(0, 220),
       significance: ruleBasedSignificance(excerpt),
+      url: itemUrl, // null falls back to the source's page URL at the call site
     });
   }
 
@@ -360,8 +362,10 @@ ${after.slice(0, 3000)}`;
 // the caller should treat an empty result as "couldn't find dated items,"
 // not "confirmed nothing happened." Falls back to regex-based date
 // scanning (no API cost) if no key is configured or the call fails.
-export async function extractRecentItems({ sourceName, content, windowDays }) {
-  if (!hasApiKey) return ruleBasedExtractRecentItems(content, windowDays);
+export async function extractRecentItems({ sourceName, lines, windowDays }) {
+  if (!hasApiKey) return ruleBasedExtractRecentItems(lines, windowDays);
+
+  const contentForPrompt = lines.map((l) => l.line).join("\n");
 
   const prompt = `You are a competitive intelligence analyst for Railway (a cloud deployment platform).
 Below is the current content of a page from a competitor ("${sourceName}"). The page may list changelog entries, blog posts, or other dated items.
@@ -375,7 +379,7 @@ NONE
 Do not guess dates that aren't actually visible in the content. Do not include items you're not reasonably confident are within the window.
 
 --- PAGE CONTENT ---
-${content.slice(0, 6000)}`;
+${contentForPrompt.slice(0, 6000)}`;
 
   try {
     const response = await anthropic.messages.create({
@@ -388,21 +392,55 @@ ${content.slice(0, 6000)}`;
     if (/^\s*NONE\s*$/i.test(text.trim())) return [];
 
     const items = [];
-    for (const line of text.split("\n")) {
-      const match = line.match(/^ITEM:\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(LOW|MEDIUM|HIGH)\s*$/i);
+    for (const responseLine of text.split("\n")) {
+      const match = responseLine.match(/^ITEM:\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(LOW|MEDIUM|HIGH)\s*$/i);
       if (match) {
+        const summary = match[2].trim();
+        // Claude summarizes/paraphrases, so its output text won't exactly
+        // match any single source line — find the best-matching original
+        // line (by simple substring/word-overlap) to recover a real URL,
+        // rather than asking Claude to invent or format one itself.
+        const url = findBestMatchingUrl(summary, lines);
         items.push({
           dateLabel: match[1].trim(),
-          summary: match[2].trim(),
+          summary,
           significance: match[3].toUpperCase(),
+          url,
         });
       }
     }
     return items;
   } catch (err) {
     console.warn(`[summarize] Claude call failed for "${sourceName}" (${err.message}) — using rule-based fallback.`);
-    return ruleBasedExtractRecentItems(content, windowDays);
+    return ruleBasedExtractRecentItems(lines, windowDays);
   }
+}
+
+// Best-effort match between an AI-written (paraphrased) summary and the
+// original extracted lines, to recover that line's URL. Uses simple word
+// overlap rather than exact substring matching, since Claude's summary is
+// rarely a verbatim copy of the source line.
+function findBestMatchingUrl(summary, lines) {
+  const summaryWords = new Set(
+    summary.toLowerCase().replace(/[^\w\s]/g, "").split(/\s+/).filter((w) => w.length > 3)
+  );
+  if (summaryWords.size === 0) return null;
+
+  let bestScore = 0;
+  let bestUrl = null;
+  for (const { line, url } of lines) {
+    if (!url) continue;
+    const lineWords = line.toLowerCase().replace(/[^\w\s]/g, "").split(/\s+/).filter((w) => w.length > 3);
+    const overlap = lineWords.filter((w) => summaryWords.has(w)).length;
+    if (overlap > bestScore) {
+      bestScore = overlap;
+      bestUrl = url;
+    }
+  }
+  // Require at least 2 overlapping distinctive words before trusting the
+  // match — otherwise a weak/coincidental overlap could attach the wrong
+  // article's URL to a summary, which is worse than no link at all.
+  return bestScore >= 2 ? bestUrl : null;
 }
 
 // Debug: run extractRecentItems on already-known content and show the RAW
@@ -410,15 +448,16 @@ ${content.slice(0, 6000)}`;
 // nothing" outcome can be told apart on sight. Does NOT fall back silently
 // — surfaces the raw error or the rule-based result explicitly, since this
 // endpoint exists specifically to diagnose problems, not paper over them.
-export async function debugExtractRecentItems({ sourceName, content, windowDays }) {
+export async function debugExtractRecentItems({ sourceName, lines, windowDays }) {
   const todayStr = new Date().toISOString().slice(0, 10);
+  const contentForPrompt = lines.map((l) => l.line).join("\n");
 
   if (!hasApiKey) {
     return {
       hasApiKey: false,
       todayUsedInPrompt: todayStr,
       note: "No ANTHROPIC_API_KEY configured — showing rule-based fallback result instead of a Claude call.",
-      ruleBasedResult: ruleBasedExtractRecentItems(content, windowDays),
+      ruleBasedResult: ruleBasedExtractRecentItems(lines, windowDays),
     };
   }
 
@@ -434,7 +473,7 @@ NONE
 Do not guess dates that aren't actually visible in the content. Do not include items you're not reasonably confident are within the window.
 
 --- PAGE CONTENT ---
-${content.slice(0, 6000)}`;
+${contentForPrompt.slice(0, 6000)}`;
 
   try {
     const response = await anthropic.messages.create({
@@ -450,7 +489,7 @@ ${content.slice(0, 6000)}`;
       todayUsedInPrompt: todayStr,
       apiError: err.message,
       note: "API key is configured but the call failed (see apiError). Showing rule-based fallback result too.",
-      ruleBasedResult: ruleBasedExtractRecentItems(content, windowDays),
+      ruleBasedResult: ruleBasedExtractRecentItems(lines, windowDays),
     };
   }
 }

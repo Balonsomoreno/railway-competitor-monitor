@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
 import { pool, initSchema } from "./db.js";
-import { checkAllSources, scanRecentAcrossSources, fetchSource, extractText } from "./monitor.js";
+import { checkAllSources, scanRecentAcrossSources, fetchSource, extractText, extractTextWithLinks } from "./monitor.js";
 import { debugExtractRecentItems } from "./summarize.js";
 import { SOURCES, CANDIDATE_SOURCES, COMPANY_HOMEPAGES } from "./sources.js";
 
@@ -87,7 +87,7 @@ app.get("/api/refresh-all", async (req, res) => {
     for (const item of r.items || []) {
       merged.push({
         source: r.source,
-        url: r.url,
+        url: item.url || r.url, // prefer the item's own article/entry URL; fall back to the page URL if none was found
         summary: item.summary,
         significance: item.significance,
         dateLabel: item.dateLabel,
@@ -120,12 +120,13 @@ app.get("/api/debug-source", async (req, res) => {
   try {
     const html = await fetchSource(source);
     const text = extractText(html, source.selector);
+    const linkedLines = extractTextWithLinks(html, source.selector, source.url);
     const windowDays = { "24h": 1, "7d": 7, "30d": 30 }[req.query.window] || 7;
     // Also run the actual Claude extraction and return its RAW response, so
     // a parsing bug and "Claude genuinely found nothing" can be told apart.
     const claudeDebug = await debugExtractRecentItems({
       sourceName: source.name,
-      content: text,
+      lines: linkedLines,
       windowDays,
     });
     res.json({
@@ -135,6 +136,7 @@ app.get("/api/debug-source", async (req, res) => {
       rawHtmlLength: html.length,
       extractedTextLength: text.length,
       extractedTextFirst6000Chars: text.slice(0, 6000), // exactly what extractRecentItems() actually sees
+      linkedLinesSample: linkedLines.slice(0, 15), // first 15 { line, url } pairs, for inspecting link extraction
       claudeDebug, // { todayUsedInPrompt, promptLength, rawClaudeResponse }
     });
   } catch (err) {
@@ -294,7 +296,6 @@ app.get("/", async (req, res) => {
       font-size: 13px;
       color: var(--ink-soft);
       margin: 0;
-      max-width: 60ch;
     }
     .refresh-btn {
       background: var(--ink);
@@ -344,6 +345,7 @@ app.get("/", async (req, res) => {
       color: var(--ink-faint);
       background: var(--paper-raised);
       border: 1px solid var(--rule);
+      border-top: 2px solid var(--structure);
       border-radius: 6px;
       padding: 8px 10px;
       min-width: 140px;
@@ -431,10 +433,15 @@ app.get("/", async (req, res) => {
       grid-template-columns: 88px 1fr auto;
       gap: 16px;
       align-items: baseline;
-      padding: 14px 0;
+      padding: 14px 16px;
+      margin: 0 -16px;
       border-bottom: 1px solid var(--rule);
+      border-left: 3px solid transparent;
+      border-radius: 4px;
     }
     .row:last-child { border-bottom: none; }
+    .row.sig-high { border-left-color: #C77D2E; background: #FBF3EA; }
+    .row.sig-medium { border-left-color: #8A6A3D; background: #F8F5EF; }
 
     .row-sig {
       font-family: var(--mono);
@@ -502,6 +509,13 @@ app.get("/", async (req, res) => {
       padding: 20px 22px;
       margin-bottom: 36px;
     }
+    .signal-section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
     .signal-section .row { padding: 12px 0; }
     .signal-empty {
       color: var(--ink-faint);
@@ -549,12 +563,16 @@ app.get("/", async (req, res) => {
       <p class="subhead">Built to answer "what have our competitors done recently?"</p>
       <p class="tagline">Checks changelogs, blogs, docs, status pages, pricing, and job listings across eight competitive developer platforms, surfacing competitive moves for ongoing intelligence.</p>
     </div>
-    <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
   </header>
 
   <div class="signal-section">
-    <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
-    <p class="section-intro" style="margin-bottom:8px">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out. Press "Check for updates" above to refresh.</p>
+    <div class="signal-section-header">
+      <div>
+        <div class="section-title" style="margin-bottom:4px">Latest competitive signals</div>
+        <p class="section-intro" style="margin-bottom:8px; max-width:none">Meaningful moves from the last 30 days across all ${SOURCES.length} sources, grouped by competitor — routine updates filtered out.</p>
+      </div>
+      <button class="refresh-btn" id="scanBtn" onclick="runRefresh()">Check for updates</button>
+    </div>
     <p class="sig-legend" style="margin-bottom:16px">
       <span class="sig-legend-item"><span class="sig-dot" style="background:#C77D2E"></span>High — pricing, breaking changes, or a major move</span>
       <span class="sig-legend-item"><span class="sig-dot" style="background:#8A6A3D"></span>Medium — a real launch or update worth a glance</span>
@@ -622,7 +640,8 @@ app.get("/", async (req, res) => {
             const channel = item.source.slice(company.length).trim() || 'Page';
             const color = sigColors[item.significance] || sigColors.MEDIUM;
             const label = sigLabels[item.significance] || 'Medium';
-            return '<div class="row"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + item.url + '" target="_blank" rel="noopener" class="row-summary-link">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
+            const sigClass = item.significance === 'HIGH' ? ' sig-high' : ' sig-medium';
+            return '<div class="row' + sigClass + '"><div class="row-sig" style="color:' + color + '">' + label + '</div><div class="row-body"><div class="row-source"><span class="row-channel">' + channel + '</span></div><div class="row-summary"><a href="' + item.url + '" target="_blank" rel="noopener" class="row-summary-link">' + item.summary + '</a></div></div><div class="row-time">' + item.dateLabel + '</div></div>';
           };
 
           // Group by company so the signal reads as "here's what each
@@ -663,7 +682,7 @@ app.get("/", async (req, res) => {
   <div class="feed-header" style="margin-top:36px">
     <div class="section-title" style="margin-bottom:0">Full change history</div>
   </div>
-  <p class="section-intro">Every change caught by the background checker, in order — same source as the signal above, just unsorted. Use the tabs to only look at a certain time range.</p>
+  <p class="section-intro" style="max-width:none">Every source change caught by a running background checker. Use the tabs to look at a certain time range.</p>
 
   <div class="feed-header">
     <div class="window-tabs">
@@ -690,8 +709,8 @@ app.get("/", async (req, res) => {
             const companyLabel = homepage
               ? `<a href="${homepage}" target="_blank" rel="noopener" class="coverage-company-link">${company}</a>`
               : company;
-            return `
-    <div class="row">
+            const sigClass = c.significance === "HIGH" ? " sig-high" : c.significance === "MEDIUM" ? " sig-medium" : "";
+            return `<div class="row${sigClass}">
       <div class="row-sig" style="color:${sig.color}">${sig.label}</div>
       <div class="row-body">
         <div class="row-source"><span class="row-company">${companyLabel}</span><span class="row-channel">${channel}</span></div>
