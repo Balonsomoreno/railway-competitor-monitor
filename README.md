@@ -2,11 +2,11 @@
 
 A small service that watches Railway's competitors (Render, Fly.io, Vercel, Heroku) for
 changes to their public blogs and changelogs, and uses Claude to summarize *what* changed
-and *how significant* it looks — instead of a raw diff nobody reads.
+and *how significant* it looks.
 
-Built as a hands-on exercise while prepping for Railway's Growth Content Engineer role,
+Built as a hands-on exercise while prepping a brand-side competitive monitor tool,
 and as a real personal tool: this is a lightweight, portable version of a competitive
-monitoring workflow I run day-to-day at Anthropic for the Claude Blog.
+monitoring workflow I run day-to-day.
 
 ## How it works
 
@@ -40,17 +40,8 @@ monitoring workflow I run day-to-day at Anthropic for the Claude Blog.
 5. Hit **Generate Domain** under Networking to get a public URL, then visit `/` and
    click "Check now" to establish baselines for all four sources.
 
-## Why this exists
-
-Railway's Growth Content Engineer role is scoped around AEO (answer engine
-optimization) — understanding not just how Railway ranks in search, but how it shows
-up (or doesn't) in LLM answers, and what competitors are shipping/saying that affects
-that. This tool is a small, concrete example of "engineering + content" applied to
-that exact problem: automated competitive visibility, not a manually-maintained doc
-that goes stale in a week.
-
 ## Notes / honest scope
 
 This is a demo-scale build, not the production competitive-intelligence agent I run
-at Anthropic (which is tied into internal analytics and CMS tooling via MCP). It's
+at organizations (which is tied into internal analytics, CRM tooling, etc, via MCP). It's
 built to be small enough to explain in five minutes and real enough to actually run.
