@@ -32,6 +32,25 @@ function escapeHtml(str) {
 
 await initSchema();
 
+// Guards expensive/destructive endpoints (Claude API calls, DB wipes) so
+// they can't be triggered by anyone who finds the public URL. Checks for
+// a shared secret in the x-admin-key header against ADMIN_KEY (set in
+// Railway's Variables tab). If ADMIN_KEY isn't set, this fails open (logs
+// a warning but allows the request) so local dev without the env var
+// still works — but it means production MUST have ADMIN_KEY set, or
+// these routes are unprotected.
+function requireAdminKey(req, res, next) {
+  const expected = process.env.ADMIN_KEY;
+  if (!expected) {
+    console.warn("ADMIN_KEY not set — admin endpoints are UNPROTECTED");
+    return next();
+  }
+  if (req.get("x-admin-key") !== expected) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
 // --- API ---
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
@@ -53,7 +72,7 @@ app.get("/api/sources", (req, res) => {
 });
 
 // Manual trigger — useful for demos and for the initial baseline run.
-app.post("/api/check-now", async (req, res) => {
+app.post("/api/check-now", requireAdminKey, async (req, res) => {
   const results = await checkAllSources();
   res.json({ ranAt: new Date().toISOString(), results });
 });
@@ -68,7 +87,7 @@ app.post("/api/check-now", async (req, res) => {
 // the sources/config, only the accumulated history; a full "Check for
 // updates" pass afterward is required to repopulate anything, so this
 // endpoint alone leaves the dashboard temporarily empty.
-app.post("/api/reset-history", async (req, res) => {
+app.post("/api/reset-history", requireAdminKey, async (req, res) => {
   try {
     const changesResult = await pool.query(`DELETE FROM changes`);
     const snapshotsResult = await pool.query(`DELETE FROM snapshots`);
@@ -92,7 +111,7 @@ app.post("/api/reset-history", async (req, res) => {
 // history. Slower and more expensive than /api/check-now (38 fetches + 38
 // Claude calls), so it's a separate explicit action, not run on every page
 // load.
-app.get("/api/scan-recent", async (req, res) => {
+app.get("/api/scan-recent", requireAdminKey, async (req, res) => {
   const windowDays = { "24h": 1, "7d": 7, "30d": 30 }[req.query.window] || 7;
   const results = await scanRecentAcrossSources(windowDays);
   res.json({ scannedAt: new Date().toISOString(), windowDays, results });
@@ -106,7 +125,7 @@ app.get("/api/scan-recent", async (req, res) => {
 // is an implementation detail (different mechanisms for catching
 // different kinds of gaps), not something worth exposing as two separate
 // buttons/results the person has to reconcile themselves.
-app.get("/api/refresh-all", async (req, res) => {
+app.get("/api/refresh-all", requireAdminKey, async (req, res) => {
   const windowDays = { "24h": 1, "7d": 7, "30d": 30 }[req.query.window] || 7;
   const [checkResults, scanResults] = await Promise.all([
     checkAllSources(),
@@ -153,7 +172,7 @@ app.get("/api/refresh-all", async (req, res) => {
 // (one extra Claude call, only meaningful with real signal items) synthesis
 // step can be sequenced client-side: show the list first, then layer in
 // analysis, rather than blocking the whole page on one slow combined call.
-app.post("/api/synthesize", async (req, res) => {
+app.post("/api/synthesize", requireAdminKey, async (req, res) => {
   const items = Array.isArray(req.body?.items) ? req.body.items : [];
   const analysis = await synthesizeCompetitiveAnalysis(items);
   res.json({ analysis }); // analysis is null if no key configured, no items, or the call failed — caller shows nothing in that case
@@ -166,7 +185,7 @@ app.post("/api/synthesize", async (req, res) => {
 // selector is grabbing the wrong part of the page, or (d) something else,
 // this shows the real extracted text so it can be read directly. Takes a
 // `source` query param matching a name in SOURCES exactly (case-sensitive).
-app.get("/api/debug-source", async (req, res) => {
+app.get("/api/debug-source", requireAdminKey, async (req, res) => {
   const source = SOURCES.find((s) => s.name === req.query.source);
   if (!source) {
     return res.status(404).json({
@@ -207,7 +226,7 @@ app.get("/api/debug-source", async (req, res) => {
 // anything to the DB or adding them to the live monitor list. Use this to
 // see which categories get through Railway's network before promoting any
 // of them into sources.js's SOURCES array.
-app.get("/api/test-candidates", async (req, res) => {
+app.get("/api/test-candidates", requireAdminKey, async (req, res) => {
   const all = Object.entries(CANDIDATE_SOURCES)
     .filter(([, sources]) => Array.isArray(sources)) // skip community_note (a string, not a source list)
     .flatMap(([category, sources]) => sources.map((s) => ({ ...s, category })));
@@ -795,6 +814,20 @@ app.get("/", async (req, res) => {
         .replace(/'/g, '&#39;');
     }
 
+    // Guarded endpoints (reset-history, refresh-all, synthesize) require
+    // an x-admin-key header matching the server's ADMIN_KEY. Ask for it
+    // once and cache it in this browser's localStorage so you're not
+    // re-typing it on every click; a wrong/missing key just gets a 401
+    // from the server, which the callers below already handle as an error.
+    function adminHeaders(extra) {
+      let key = localStorage.getItem('adminKey');
+      if (!key) {
+        key = prompt('Admin key (set as ADMIN_KEY in Railway):') || '';
+        localStorage.setItem('adminKey', key);
+      }
+      return Object.assign({ 'x-admin-key': key }, extra || {});
+    }
+
     // Destructive — wipes stored history so old fallback-generated
     // summaries (e.g. from before API credits were added) get replaced
     // with real AI summaries on the next check, instead of sitting
@@ -809,7 +842,7 @@ app.get("/", async (req, res) => {
       btn.disabled = true;
       btn.textContent = 'Clearing…';
       try {
-        const res = await fetch('/api/reset-history', { method: 'POST' });
+        const res = await fetch('/api/reset-history', { method: 'POST', headers: adminHeaders() });
         const data = await res.json();
         if (data.error) {
           alert('Reset failed: ' + data.error);
@@ -855,7 +888,7 @@ app.get("/", async (req, res) => {
       btn.textContent = 'Checking ' + ${SOURCES.length} + ' sources…';
 
       try {
-        const res = await fetch('/api/refresh-all?window=' + scanWindow);
+        const res = await fetch('/api/refresh-all?window=' + scanWindow, { headers: adminHeaders() });
         const data = await res.json();
         // Only HIGH/MEDIUM surface here — this section is meant to be a
         // short, meaningful list, not everything that technically
@@ -907,7 +940,7 @@ app.get("/", async (req, res) => {
           try {
             const synthRes = await fetch('/api/synthesize', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: adminHeaders({ 'Content-Type': 'application/json' }),
               body: JSON.stringify({ items: notable }),
             });
             const synthData = await synthRes.json();
